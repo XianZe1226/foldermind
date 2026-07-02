@@ -13,10 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
+          - os: macos-15
             bundleArgs: --bundles dmg
           - os: windows-latest
-            bundleArgs: --bundles nsis
+            bundleArgs: --target x86_64-pc-windows-msvc --bundles nsis
     runs-on: ${{ matrix.os }}
 
     steps:
