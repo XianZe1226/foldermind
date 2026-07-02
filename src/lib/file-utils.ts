@@ -58,10 +58,10 @@ export async function rawFileToDocument(
     text = sanitizeText(file.textContent ?? "");
   } else if (file.extension === ".pdf") {
     try {
-      const payload = await extractPdfPayload(file.absolutePath, 8);
+      const payload = await extractPdfPayload(file.absolutePath, 0);
       text = sanitizeText(payload.text);
 
-      const shouldTryOcr = isInsufficientPdfText(text);
+      const shouldTryOcr = isInsufficientPdfText(text) || payload.ocrCandidatePages > 0;
       if (shouldTryOcr) {
         if (hasReadyOcrSettings(ocrSettings)) {
           try {
@@ -70,11 +70,11 @@ export async function rawFileToDocument(
             );
 
             if (ocrText) {
-              text = ocrText.length > text.length ? ocrText : text;
+              text = sanitizeText([text, ocrText].filter(Boolean).join("\n\n"));
               warnings.push(
-                payload.processedPages < payload.totalPages
-                  ? `已启用 OCR，识别前 ${payload.processedPages} 页 / 共 ${payload.totalPages} 页。`
-                  : `已启用 OCR，识别 ${payload.processedPages} 页扫描内容。`
+                payload.ocrTruncated
+                  ? `已启用 OCR，补充识别 ${payload.processedPages} 页疑似扫描页；仍有 ${Math.max(payload.ocrCandidatePages - payload.processedPages, 0)} 页未 OCR。`
+                  : `已启用 OCR，补充识别 ${payload.processedPages} 页疑似扫描页。`
               );
             } else {
               warnings.push("已尝试 OCR，但仍未提取到有效正文。");
@@ -87,7 +87,11 @@ export async function rawFileToDocument(
         } else if (!text) {
           warnings.push("当前未配置 OCR，扫描版 PDF 可能无法提取正文。");
         } else {
-          warnings.push("PDF 正文较少，如为扫描版可在设置页开启 OCR。");
+          warnings.push(
+            payload.ocrCandidatePages > 0
+              ? `检测到 ${payload.ocrCandidatePages} 页疑似扫描页；如需补全文字，请在设置页开启 OCR。`
+              : "PDF 正文较少，如为扫描版可在设置页开启 OCR。"
+          );
         }
       }
     } catch (error) {

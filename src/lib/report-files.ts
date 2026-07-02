@@ -50,11 +50,11 @@ export function buildReviewMarkdown(
   const normalized = reviewMarkdown.trim();
   if (!normalized) {
     return [
-      `# ${folderName} 整体复习总结`,
+      `# ${folderName} 复习冲刺总结`,
       "",
       `生成时间: ${new Date(generatedAt).toLocaleString("zh-CN", { hour12: false })}`,
       "",
-      "暂未生成有效的整体复习总结。"
+      "暂未生成有效的复习冲刺总结。"
     ].join("\n");
   }
 
@@ -63,7 +63,7 @@ export function buildReviewMarkdown(
   }
 
   return [
-    `# ${folderName} 整体复习总结`,
+    `# ${folderName} 复习冲刺总结`,
     "",
     `生成时间: ${new Date(generatedAt).toLocaleString("zh-CN", { hour12: false })}`,
     "",

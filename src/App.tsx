@@ -55,6 +55,15 @@ function App() {
     snapshot.notes[0]?.id ?? null
   );
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [reviewPromptState, setReviewPromptState] = useState<{
+    visible: boolean;
+    path: string | null;
+    autoOpened: boolean;
+  }>({
+    visible: false,
+    path: null,
+    autoOpened: false
+  });
 
   const hasSavedSettings =
     savedSettings.apiKey.trim().length > 0 &&
@@ -169,14 +178,24 @@ function App() {
       setSelectedNoteId(generated.notes[0]?.id ?? null);
       setStatus("ready");
       setView("notes");
-      setStatusMessage(`已自动保存到 ${output.outputDir}`);
+      setStatusMessage(`已自动保存到 ${output.outputDir}，正在打开复习冲刺总结...`);
 
-      const shouldOpenReview = window.confirm(
-        `总结已完成，并已保存整体复习总结。\n\n是否现在打开总结文档？\n${output.reviewReportPath}`
-      );
-      if (shouldOpenReview) {
+      let autoOpened = false;
+      try {
         await openLocalPath(output.reviewReportPath);
+        autoOpened = true;
+        setStatusMessage(`已自动保存到 ${output.outputDir}，并已打开复习冲刺总结。`);
+      } catch {
+        setStatusMessage(
+          `已自动保存到 ${output.outputDir}，但未能自动打开复习冲刺总结，请在弹窗中重试。`
+        );
       }
+
+      setReviewPromptState({
+        visible: true,
+        path: output.reviewReportPath,
+        autoOpened
+      });
     } catch (error) {
       console.error(error);
       setStatus("error");
@@ -229,6 +248,21 @@ function App() {
     setStatusMessage("模型与 OCR 配置已保存，之后的扫描和总结都会使用这组参数。");
   }
 
+  async function handleOpenReviewSummary() {
+    if (!savedOutput?.reviewReportPath) {
+      setStatusMessage("当前还没有可打开的复习冲刺总结。");
+      return;
+    }
+
+    try {
+      await openLocalPath(savedOutput.reviewReportPath);
+      setStatusMessage(`已打开复习冲刺总结：${savedOutput.reviewReportPath}`);
+    } catch (error) {
+      console.error(error);
+      setStatusMessage(error instanceof Error ? error.message : "打开复习冲刺总结失败。");
+    }
+  }
+
   return (
     <div className="app-shell">
       <AppSidebar
@@ -279,6 +313,7 @@ function App() {
             savedOutput={savedOutput}
             selectedCategory={selectedCategory}
             selectedNoteId={selectedNoteId}
+            onOpenReviewSummary={handleOpenReviewSummary}
             onSelectCategory={setSelectedCategory}
             onSelectNote={setSelectedNoteId}
             onChangeNoteContent={handleNoteContentChange}
@@ -298,6 +333,42 @@ function App() {
           />
         )}
       </main>
+
+      {reviewPromptState.visible && reviewPromptState.path ? (
+        <div className="modal-backdrop" role="presentation">
+          <div
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="review-modal-title"
+          >
+            <p className="eyebrow">Review Sprint</p>
+            <h3 id="review-modal-title">复习冲刺总结已生成</h3>
+            <p>
+              已按“看完就去做题”的目标生成整体复习冲刺，并保存到下面这个文件。
+              {reviewPromptState.autoOpened ? " 文档已经自动打开，你也可以再次打开。" : " 你现在可以直接打开它。"}
+            </p>
+            <div className="modal-path">{reviewPromptState.path}</div>
+            <div className="modal-actions">
+              <button className="primary-button" onClick={handleOpenReviewSummary}>
+                {reviewPromptState.autoOpened ? "再次打开复习冲刺总结" : "打开复习冲刺总结"}
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() =>
+                  setReviewPromptState({
+                    visible: false,
+                    path: null,
+                    autoOpened: false
+                  })
+                }
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -34,7 +34,7 @@ export async function writeAnalysisBundle(
 
 export async function extractPdfPayload(
   pdfPath: string,
-  maxPages = 8
+  maxPages = 0
 ): Promise<PdfExtractionResult> {
   return invoke<PdfExtractionResult>("extract_pdf_payload", {
     pdfPath,

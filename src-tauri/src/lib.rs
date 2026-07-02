@@ -49,6 +49,8 @@ struct PdfExtractionResult {
     images_base64: Vec<String>,
     processed_pages: u32,
     total_pages: u32,
+    ocr_candidate_pages: u32,
+    ocr_truncated: bool,
 }
 
 #[command]
@@ -167,7 +169,7 @@ fn extract_pdf_payload(pdf_path: String, max_pages: u32) -> Result<PdfExtraction
         .arg("-c")
         .arg(PDF_HELPER_SCRIPT)
         .arg(&pdf_path)
-        .arg(max_pages.max(1).to_string())
+        .arg(max_pages.to_string())
         .output()
         .map_err(|error| format!("无法启动本地 PDF 解析器: {error}"))?;
 
@@ -208,6 +210,14 @@ fn extract_pdf_payload(pdf_path: String, max_pages: u32) -> Result<PdfExtraction
             .get("totalPages")
             .and_then(Value::as_u64)
             .unwrap_or_default() as u32,
+        ocr_candidate_pages: payload
+            .get("ocrCandidatePages")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32,
+        ocr_truncated: payload
+            .get("ocrTruncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -278,7 +288,7 @@ import json
 import sys
 
 pdf_path = sys.argv[1]
-max_pages = max(int(sys.argv[2]), 1)
+max_pages = int(sys.argv[2])
 
 try:
     import fitz
@@ -288,12 +298,18 @@ except Exception as exc:
 doc = fitz.open(pdf_path)
 text_parts = []
 images = []
-processed_pages = min(len(doc), max_pages)
+ocr_page_indices = []
 
-for page in doc:
-    text_parts.append(page.get_text('text') or '')
+for page_index in range(len(doc)):
+    page = doc.load_page(page_index)
+    page_text = page.get_text('text') or ''
+    text_parts.append(page_text)
+    normalized = ''.join(page_text.split())
+    if len(normalized) < 40:
+        ocr_page_indices.append(page_index)
 
-for page_index in range(processed_pages):
+processed_pages = len(ocr_page_indices) if max_pages <= 0 else min(len(ocr_page_indices), max_pages)
+for page_index in ocr_page_indices[:processed_pages]:
     page = doc.load_page(page_index)
     pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
     png_bytes = pix.tobytes('png')
@@ -304,5 +320,7 @@ print(json.dumps({
     'imagesBase64': images,
     'processedPages': processed_pages,
     'totalPages': len(doc),
+    'ocrCandidatePages': len(ocr_page_indices),
+    'ocrTruncated': len(ocr_page_indices) > processed_pages,
 }, ensure_ascii=False))
 "#;

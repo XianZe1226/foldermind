@@ -96,6 +96,8 @@ export interface PdfExtractionResult {
   imagesBase64: string[];
   processedPages: number;
   totalPages: number;
+  ocrCandidatePages: number;
+  ocrTruncated: boolean;
 }
 
 export interface AppSnapshot {

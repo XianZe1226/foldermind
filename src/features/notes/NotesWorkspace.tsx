@@ -14,6 +14,7 @@ interface NotesWorkspaceProps {
   savedOutput: SaveResult | null;
   selectedCategory: string;
   selectedNoteId: string | null;
+  onOpenReviewSummary: () => Promise<void>;
   onSelectCategory: (category: string) => void;
   onSelectNote: (noteId: string) => void;
   onChangeNoteContent: (noteId: string, content: string) => void;
@@ -27,6 +28,7 @@ export function NotesWorkspace({
   savedOutput,
   selectedCategory,
   selectedNoteId,
+  onOpenReviewSummary,
   onSelectCategory,
   onSelectNote,
   onChangeNoteContent,
@@ -57,9 +59,14 @@ export function NotesWorkspace({
               <p className="eyebrow">Report</p>
               <h3>文件夹总览</h3>
             </div>
-            <button className="ghost-button" onClick={onResaveToFolder}>
-              重新保存
-            </button>
+            <div className="panel-actions">
+              <button className="ghost-button" onClick={onOpenReviewSummary} disabled={!savedOutput}>
+                打开复习冲刺
+              </button>
+              <button className="ghost-button" onClick={onResaveToFolder}>
+                重新保存
+              </button>
+            </div>
           </div>
 
           <div className="report-overview">
@@ -81,8 +88,8 @@ export function NotesWorkspace({
           </div>
 
           <div className="output-card">
-            <span>整体复习总结</span>
-            <strong>{savedOutput?.reviewReportPath ?? "生成后会额外保存一份整体复习总结 Markdown"}</strong>
+            <span>复习冲刺总结</span>
+            <strong>{savedOutput?.reviewReportPath ?? "生成后会额外保存一份复习冲刺 Markdown"}</strong>
           </div>
         </div>
 
