@@ -2,11 +2,12 @@ import mammoth from "mammoth";
 import { acceptedExtensions, defaultOcrSettings } from "./constants";
 import { extractPdfText } from "./backend";
 import { extractTextWithOcr, hasReadyOcrSettings } from "./ocr";
-import { renderPdfPagesForOcr } from "./pdf";
+import { renderPdfPagesForOcrBatches } from "./pdf";
 import type { DocumentRecord, OcrSettings, RawScannedFile } from "./types";
 
 interface ParseDocumentOptions {
   ocrSettings?: OcrSettings;
+  enableOcr?: boolean;
 }
 
 export function formatBytes(size: number): string {
@@ -58,54 +59,63 @@ export async function rawFileToDocument(
   if (file.extension === ".md" || file.extension === ".txt") {
     text = sanitizeText(file.textContent ?? "");
   } else if (file.extension === ".pdf") {
-    if (!file.binaryBase64) {
-      warnings.push("PDF 数据为空，无法解析。");
-    } else {
-      let backendPageTexts: string[] = [];
-      let backendExtractionFailed = false;
+    let backendPageTexts: string[] = [];
+    let backendExtractionFailed = false;
 
-      try {
-        const textPayload = await extractPdfText(file.absolutePath);
-        backendPageTexts = textPayload.pageTexts;
-        text = sanitizeText(textPayload.text);
-      } catch (error) {
-        backendExtractionFailed = true;
-        warnings.push(
-          error instanceof Error ? `PDF 文本抽取失败：${error.message}` : "PDF 文本抽取失败。"
-        );
-      }
+    try {
+      const textPayload = await extractPdfText(file.absolutePath);
+      backendPageTexts = textPayload.pageTexts;
+      text = sanitizeText(textPayload.text);
+    } catch (error) {
+      backendExtractionFailed = true;
+      warnings.push(
+        error instanceof Error ? `PDF 文本抽取失败：${error.message}` : "PDF 文本抽取失败。"
+      );
+    }
 
-      const shouldTryOcr = backendExtractionFailed || isInsufficientPdfText(text);
-      const pageIndicesNeedingOcr = backendPageTexts
-        .map((pageText, index) => ({
-          index,
-          length: sanitizeText(pageText).replace(/\s/g, "").length
-        }))
-        .filter((page) => page.length < 40)
-        .map((page) => page.index);
+    const shouldTryOcr = backendExtractionFailed || isInsufficientPdfText(text);
+    const pageIndicesNeedingOcr = backendPageTexts
+      .map((pageText, index) => ({
+        index,
+        length: sanitizeText(pageText).replace(/\s/g, "").length
+      }))
+      .filter((page) => page.length < 40)
+      .map((page) => page.index);
 
-      if (shouldTryOcr && hasReadyOcrSettings(ocrSettings)) {
+    if (shouldTryOcr && options.enableOcr && hasReadyOcrSettings(ocrSettings)) {
+      if (!file.binaryBase64) {
+        warnings.push("需要 OCR 补读，但当前没有加载 PDF 图像数据。");
+      } else {
         try {
-          const renderPayload = await renderPdfPagesForOcr(base64ToArrayBuffer(file.binaryBase64), {
-            pageIndices:
-              pageIndicesNeedingOcr.length > 0 ? pageIndicesNeedingOcr : undefined,
-            renderAllPages: backendExtractionFailed || backendPageTexts.length === 0
-          });
-          const ocrResult = await extractTextWithOcr(renderPayload.imagesBase64, ocrSettings);
+          const ocrPageTexts: string[] = [];
+          const ocrPageIndices: number[] = [];
+          const renderStats = await renderPdfPagesForOcrBatches(
+            base64ToArrayBuffer(file.binaryBase64),
+            {
+              pageIndices:
+                pageIndicesNeedingOcr.length > 0 ? pageIndicesNeedingOcr : undefined,
+              renderAllPages: backendExtractionFailed || backendPageTexts.length === 0,
+              batchSize: 1
+            },
+            async (imagesBase64, pageIndices) => {
+              const ocrResult = await extractTextWithOcr(imagesBase64, ocrSettings);
+              pageIndices.forEach((pageIndex, resultIndex) => {
+                ocrPageIndices.push(pageIndex);
+                ocrPageTexts.push(ocrResult.pageTexts[resultIndex] ?? "");
+              });
+            }
+          );
           const mergedText = sanitizeText(
-            mergePdfAndOcrText(
-              backendPageTexts,
-              ocrResult.pageTexts,
-              renderPayload.pageIndices
-            ) || ocrResult.text
+            mergePdfAndOcrText(backendPageTexts, ocrPageTexts, ocrPageIndices) ||
+              ocrPageTexts.join("\n\n")
           );
 
           if (mergedText) {
             text = mergedText;
             warnings.push(
               backendExtractionFailed
-                ? `PDF 主文本抽取失败，已自动改用 OCR 补读，共处理 ${renderPayload.processedPages} 页。`
-                : `这份 PDF 已经做了 OCR 补读，共处理 ${renderPayload.processedPages} 页。`
+                ? `PDF 主文本抽取失败，已自动改用 OCR 按页补读，共处理 ${renderStats.processedPages} 页。`
+                : `这份 PDF 已经做了 OCR 按页补读，共处理 ${renderStats.processedPages} 页。`
             );
           } else {
             warnings.push("已尝试 OCR，但仍未提取到有效正文。");
@@ -113,11 +123,13 @@ export async function rawFileToDocument(
         } catch (error) {
           warnings.push(error instanceof Error ? `OCR 失败：${error.message}` : "OCR 处理失败。");
         }
-      } else if (shouldTryOcr && !text) {
-        warnings.push("当前未配置 OCR，扫描版 PDF 可能无法提取正文。");
-      } else if (shouldTryOcr) {
-        warnings.push("PDF 正文较少，如为扫描版可在设置页开启 OCR。");
       }
+    } else if (shouldTryOcr && !text && hasReadyOcrSettings(ocrSettings)) {
+      warnings.push("PDF 文字层不足；点击总结时会尝试 OCR 补读。");
+    } else if (shouldTryOcr && !text) {
+      warnings.push("当前未配置 OCR，扫描版 PDF 可能无法提取正文。");
+    } else if (shouldTryOcr) {
+      warnings.push("PDF 正文较少，如为扫描版可在设置页开启 OCR。");
     }
   } else if (file.extension === ".docx") {
     if (!file.binaryBase64) {
@@ -181,7 +193,8 @@ function mergePdfAndOcrText(
     }
   });
 
-  const totalPages = pageTexts.length;
+  const lastOcrPageIndex = pageIndices.length ? Math.max(...pageIndices) : -1;
+  const totalPages = Math.max(pageTexts.length, lastOcrPageIndex + 1);
   const mergedPages: string[] = [];
 
   for (let index = 0; index < totalPages; index += 1) {

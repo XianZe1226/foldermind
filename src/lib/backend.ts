@@ -19,9 +19,13 @@ export async function scanFolder(folderPath: string): Promise<RawScannedFile[]> 
   });
 }
 
-export async function loadFileContent(absolutePath: string): Promise<LoadedFileContent> {
+export async function loadFileContent(
+  absolutePath: string,
+  options: { includeBinary?: boolean } = {}
+): Promise<LoadedFileContent> {
   return invoke<LoadedFileContent>("load_file_content", {
-    absolutePath
+    absolutePath,
+    includeBinary: options.includeBinary ?? true
   });
 }
 

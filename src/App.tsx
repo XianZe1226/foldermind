@@ -13,6 +13,7 @@ import {
 } from "./lib/backend";
 import { defaultOcrSettings, defaultSettings } from "./lib/constants";
 import { extractExcerpt, rawFileToDocument } from "./lib/file-utils";
+import { hasReadyOcrSettings } from "./lib/ocr";
 import {
   buildNoteArtifacts,
   buildNotesJson,
@@ -116,10 +117,24 @@ function App() {
       setSavedOutput(null);
       setSelectedCategory("全部");
       setSelectedNoteId(null);
-      setStatus("scanned");
       setView("import");
+
+      const checkedDocuments: DocumentRecord[] = [];
+      for (let index = 0; index < rawFiles.length; index += 1) {
+        const rawFile = rawFiles[index];
+        setStatusMessage(`正在检查 ${index + 1} / ${rawFiles.length}: ${rawFile.name}`);
+        const checkedDocument = await parseRawFileForPreview(rawFile, savedOcrSettings);
+        checkedDocuments.push(checkedDocument);
+        setDocuments([
+          ...checkedDocuments.map(compactDocumentForState),
+          ...scannedDocuments.slice(index + 1)
+        ]);
+      }
+
+      const readableCount = checkedDocuments.filter((document) => document.text.trim()).length;
+      setStatus("scanned");
       setStatusMessage(
-        `已扫描 ${scannedDocuments.length} 份文件。当前只完成清单扫描；正文读取与 OCR 会在你确认总结后才开始。`
+        `读取检查完成：${readableCount} / ${checkedDocuments.length} 份文件读到了正文。请确认是否总结当前文件夹。`
       );
     } catch (error) {
       console.error(error);
@@ -147,23 +162,13 @@ function App() {
       const parsedDocuments: DocumentRecord[] = [];
       for (let index = 0; index < documents.length; index += 1) {
         const document = documents[index];
-        setStatusMessage(`正在读取 ${index + 1} / ${documents.length}: ${document.name}`);
-        const content = await loadFileContent(document.absolutePath);
-        const parsedDocument = await rawFileToDocument(
-          {
-            name: document.name,
-            absolutePath: document.absolutePath,
-            relativePath: document.relativePath,
-            extension: document.type,
-            size: document.size,
-            lastModified: document.lastModified,
-            textContent: content.textContent,
-            binaryBase64: content.binaryBase64
-          },
-          {
-            ocrSettings: savedOcrSettings
-          }
-        );
+        setStatusMessage(`正在准备 ${index + 1} / ${documents.length}: ${document.name}`);
+        let parsedDocument = await parseDocumentForSummary(document, false, savedOcrSettings);
+
+        if (shouldRunOcrForDocument(parsedDocument) && hasReadyOcrSettings(savedOcrSettings)) {
+          setStatusMessage(`正在 OCR 补读 ${index + 1} / ${documents.length}: ${document.name}`);
+          parsedDocument = await parseDocumentForSummary(document, true, savedOcrSettings);
+        }
 
         parsedDocuments.push({
           ...parsedDocument,
@@ -416,7 +421,7 @@ function createScannedDocument(file: RawScannedFile): DocumentRecord {
     lastModified: file.lastModified,
     text: "",
     excerpt: extractExcerpt(""),
-    warnings: ["尚未读取正文；点击“总结当前文件夹”后才会开始解析。"]
+    warnings: ["等待读取检查。"]
   };
 }
 
@@ -425,6 +430,62 @@ function compactDocumentForState(document: DocumentRecord): DocumentRecord {
     ...document,
     text: document.text.length > 800 ? document.text.slice(0, 800) : document.text
   };
+}
+
+async function parseRawFileForPreview(
+  file: RawScannedFile,
+  ocrSettings: OcrSettings
+): Promise<DocumentRecord> {
+  const content = await loadFileContent(file.absolutePath, {
+    includeBinary: file.extension === ".docx"
+  });
+
+  return rawFileToDocument(
+    {
+      ...file,
+      textContent: content.textContent,
+      binaryBase64: content.binaryBase64
+    },
+    {
+      enableOcr: false,
+      ocrSettings
+    }
+  );
+}
+
+async function parseDocumentForSummary(
+  document: DocumentRecord,
+  enablePdfOcr: boolean,
+  ocrSettings: OcrSettings
+): Promise<DocumentRecord> {
+  const content = await loadFileContent(document.absolutePath, {
+    includeBinary: document.type === ".docx" || (document.type === ".pdf" && enablePdfOcr)
+  });
+
+  return rawFileToDocument(
+    {
+      name: document.name,
+      absolutePath: document.absolutePath,
+      relativePath: document.relativePath,
+      extension: document.type,
+      size: document.size,
+      lastModified: document.lastModified,
+      textContent: content.textContent,
+      binaryBase64: content.binaryBase64
+    },
+    {
+      enableOcr: enablePdfOcr,
+      ocrSettings
+    }
+  );
+}
+
+function shouldRunOcrForDocument(document: DocumentRecord): boolean {
+  return (
+    document.type === ".pdf" &&
+    document.text.replace(/\s/g, "").length < 80 &&
+    document.warnings.some((warning) => warning.includes("OCR") || warning.includes("文字层不足"))
+  );
 }
 
 export default App;

@@ -144,7 +144,7 @@ fn scan_folder(root_path: String) -> Result<Vec<ScannedFile>, String> {
 }
 
 #[command]
-fn load_file_content(absolute_path: String) -> Result<LoadedFileContent, String> {
+fn load_file_content(absolute_path: String, include_binary: bool) -> Result<LoadedFileContent, String> {
     let path = PathBuf::from(&absolute_path);
     if !path.exists() || !path.is_file() {
         return Err("所选文件不存在或无法访问。".to_string());
@@ -157,7 +157,7 @@ fn load_file_content(absolute_path: String) -> Result<LoadedFileContent, String>
         None
     };
 
-    let binary_base64 = if matches!(extension.as_str(), ".pdf" | ".docx") {
+    let binary_base64 = if include_binary && matches!(extension.as_str(), ".pdf" | ".docx") {
         let bytes = fs::read(&path).map_err(|error| error.to_string())?;
         Some(STANDARD.encode(bytes))
     } else {
