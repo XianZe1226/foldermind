@@ -36,6 +36,11 @@ export interface RawScannedFile {
   binaryBase64: string | null;
 }
 
+export interface LoadedFileContent {
+  textContent: string | null;
+  binaryBase64: string | null;
+}
+
 export interface DocumentRecord {
   id: string;
   name: string;

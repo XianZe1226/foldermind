@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  LoadedFileContent,
   OcrSettings,
   OcrResult,
   PdfTextExtractionResult,
@@ -15,6 +16,12 @@ export async function pickFolder(): Promise<string | null> {
 export async function scanFolder(folderPath: string): Promise<RawScannedFile[]> {
   return invoke<RawScannedFile[]>("scan_folder", {
     rootPath: folderPath
+  });
+}
+
+export async function loadFileContent(absolutePath: string): Promise<LoadedFileContent> {
+  return invoke<LoadedFileContent>("load_file_content", {
+    absolutePath
   });
 }
 

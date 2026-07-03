@@ -57,6 +57,13 @@ struct PdfTextExtractionResult {
     total_pages: u32,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadedFileContent {
+    text_content: Option<String>,
+    binary_base64: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct BaiduTokenResponse {
     access_token: Option<String>,
@@ -117,19 +124,6 @@ fn scan_folder(root_path: String) -> Result<Vec<ScannedFile>, String> {
             .display()
             .to_string();
 
-        let text_content = if matches!(extension.as_str(), ".md" | ".txt") {
-            Some(read_text_file(&path)?)
-        } else {
-            None
-        };
-
-        let binary_base64 = if matches!(extension.as_str(), ".pdf" | ".docx") {
-            let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-            Some(STANDARD.encode(bytes))
-        } else {
-            None
-        };
-
         files.push(ScannedFile {
             name: path
                 .file_name()
@@ -140,13 +134,40 @@ fn scan_folder(root_path: String) -> Result<Vec<ScannedFile>, String> {
             extension,
             size: metadata.len(),
             last_modified,
-            text_content,
-            binary_base64,
+            text_content: None,
+            binary_base64: None,
         });
     }
 
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(files)
+}
+
+#[command]
+fn load_file_content(absolute_path: String) -> Result<LoadedFileContent, String> {
+    let path = PathBuf::from(&absolute_path);
+    if !path.exists() || !path.is_file() {
+        return Err("所选文件不存在或无法访问。".to_string());
+    }
+
+    let extension = lowercase_extension(&path);
+    let text_content = if matches!(extension.as_str(), ".md" | ".txt") {
+        Some(read_text_file(&path)?)
+    } else {
+        None
+    };
+
+    let binary_base64 = if matches!(extension.as_str(), ".pdf" | ".docx") {
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        Some(STANDARD.encode(bytes))
+    } else {
+        None
+    };
+
+    Ok(LoadedFileContent {
+        text_content,
+        binary_base64,
+    })
 }
 
 #[command]
@@ -365,6 +386,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             scan_folder,
+            load_file_content,
             write_analysis_bundle,
             open_local_path,
             extract_pdf_text,

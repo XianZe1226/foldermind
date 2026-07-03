@@ -23,6 +23,9 @@ export function ImportPanel({
   onSummarize
 }: ImportPanelProps) {
   const readableDocuments = documents.filter((document) => document.text.trim().length > 0);
+  const pendingDocuments = documents.filter((document) =>
+    document.warnings.some((warning) => warning.includes("尚未读取正文"))
+  );
   const ocrStatus =
     savedOcrSettings.provider === "none"
       ? "未启用"
@@ -53,7 +56,13 @@ export function ImportPanel({
         </div>
         <div>
           <span className="summary-label">可用于总结</span>
-          <strong>{readableDocuments.length} / {documents.length}</strong>
+          <strong>
+            {readableDocuments.length
+              ? `${readableDocuments.length} / ${documents.length}`
+              : pendingDocuments.length
+                ? `待解析 ${pendingDocuments.length} 份`
+                : `0 / ${documents.length}`}
+          </strong>
         </div>
         <div>
           <span className="summary-label">OCR</span>
@@ -91,8 +100,12 @@ export function ImportPanel({
           <strong>{documents.length}</strong>
         </div>
         <div className="scan-stat">
-          <span>可读正文文件</span>
+          <span>正文读取完成</span>
           <strong>{readableDocuments.length}</strong>
+        </div>
+        <div className="scan-stat">
+          <span>待正文解析</span>
+          <strong>{pendingDocuments.length}</strong>
         </div>
         <div className="scan-stat">
           <span>配置状态</span>

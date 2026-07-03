@@ -4,9 +4,15 @@ import { ImportPanel } from "./features/import/ImportPanel";
 import { NotesWorkspace } from "./features/notes/NotesWorkspace";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { generateNotesFromDocuments } from "./lib/ai-service";
-import { openLocalPath, pickFolder, scanFolder, writeAnalysisBundle } from "./lib/backend";
+import {
+  loadFileContent,
+  openLocalPath,
+  pickFolder,
+  scanFolder,
+  writeAnalysisBundle
+} from "./lib/backend";
 import { defaultOcrSettings, defaultSettings } from "./lib/constants";
-import { rawFileToDocument } from "./lib/file-utils";
+import { extractExcerpt, rawFileToDocument } from "./lib/file-utils";
 import {
   buildNoteArtifacts,
   buildNotesJson,
@@ -22,6 +28,7 @@ import type {
   OcrSettings,
   ProcessingStatus,
   ProviderSettings,
+  RawScannedFile,
   SaveResult
 } from "./lib/types";
 
@@ -99,19 +106,10 @@ function App() {
       }
 
       const rawFiles = await scanFolder(folderPath);
-      const parsedDocuments = await Promise.all(
-        rawFiles.map((rawFile) =>
-          rawFileToDocument(rawFile, {
-            ocrSettings: savedOcrSettings
-          })
-        )
-      );
-      const ocrCount = parsedDocuments.filter((document) =>
-        document.warnings.some((warning) => warning.includes("OCR"))
-      ).length;
+      const scannedDocuments = rawFiles.map((rawFile) => createScannedDocument(rawFile));
 
       setSelectedFolderPath(folderPath);
-      setDocuments(parsedDocuments);
+      setDocuments(scannedDocuments);
       setNotes([]);
       setSummary(null);
       setReviewMarkdown(null);
@@ -121,9 +119,7 @@ function App() {
       setStatus("scanned");
       setView("import");
       setStatusMessage(
-        ocrCount
-          ? `已扫描 ${parsedDocuments.length} 份文件，其中 ${ocrCount} 份使用了 OCR。请确认是否总结当前文件夹。`
-          : `已扫描 ${parsedDocuments.length} 份文件。请确认是否总结当前文件夹。`
+        `已扫描 ${scannedDocuments.length} 份文件。当前只完成清单扫描；正文读取与 OCR 会在你确认总结后才开始。`
       );
     } catch (error) {
       console.error(error);
@@ -146,10 +142,46 @@ function App() {
 
     try {
       setStatus("summarizing");
-      setStatusMessage(`正在调用 ${savedSettings.provider} 生成结构化报告...`);
+      setStatusMessage("正在读取文件正文并准备总结素材...");
+
+      const parsedDocuments: DocumentRecord[] = [];
+      for (let index = 0; index < documents.length; index += 1) {
+        const document = documents[index];
+        setStatusMessage(`正在读取 ${index + 1} / ${documents.length}: ${document.name}`);
+        const content = await loadFileContent(document.absolutePath);
+        const parsedDocument = await rawFileToDocument(
+          {
+            name: document.name,
+            absolutePath: document.absolutePath,
+            relativePath: document.relativePath,
+            extension: document.type,
+            size: document.size,
+            lastModified: document.lastModified,
+            textContent: content.textContent,
+            binaryBase64: content.binaryBase64
+          },
+          {
+            ocrSettings: savedOcrSettings
+          }
+        );
+
+        parsedDocuments.push({
+          ...parsedDocument,
+          id: document.id
+        });
+      }
+
+      const readableDocuments = parsedDocuments.filter((document) => document.text.trim().length > 0);
+      setDocuments(parsedDocuments);
+
+      if (!readableDocuments.length) {
+        throw new Error("没有读到可用于总结的有效正文，请先检查文件内容或 OCR 配置。");
+      }
+
+      setStatusMessage(`正文读取完成，正在调用 ${savedSettings.provider} 生成结构化报告...`);
 
       const folderName = selectedFolderPath.split("/").filter(Boolean).pop() ?? "当前文件夹";
-      const generated = await generateNotesFromDocuments(documents, savedSettings, folderName);
+      const generated = await generateNotesFromDocuments(parsedDocuments, savedSettings, folderName);
 
       setStatus("saving");
       setStatusMessage("正在把总报告、整体复习总结和笔记自动写回所选文件夹...");
@@ -371,6 +403,21 @@ function App() {
       ) : null}
     </div>
   );
+}
+
+function createScannedDocument(file: RawScannedFile): DocumentRecord {
+  return {
+    id: crypto.randomUUID(),
+    name: file.name,
+    absolutePath: file.absolutePath,
+    relativePath: file.relativePath,
+    type: file.extension || "unknown",
+    size: file.size,
+    lastModified: file.lastModified,
+    text: "",
+    excerpt: extractExcerpt(""),
+    warnings: ["尚未读取正文；点击“总结当前文件夹”后才会开始解析。"]
+  };
 }
 
 export default App;
