@@ -5,6 +5,7 @@ const OCR_RENDER_SCALE = 1.8;
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+let workerSrcPromise: Promise<string> | null = null;
 
 function loadPdfJsModule(): Promise<PdfJsModule> {
   if (!pdfJsModulePromise) {
@@ -14,16 +15,25 @@ function loadPdfJsModule(): Promise<PdfJsModule> {
   return pdfJsModulePromise;
 }
 
+async function loadWorkerSrc(): Promise<string> {
+  if (!workerSrcPromise) {
+    workerSrcPromise = import("pdfjs-dist/legacy/build/pdf.worker.mjs?url").then(
+      (workerModule) => workerModule.default
+    );
+  }
+
+  return workerSrcPromise;
+}
+
 async function loadPdfDocument(buffer: ArrayBuffer) {
   const { getDocument, GlobalWorkerOptions } = await loadPdfJsModule();
-
-  if (!GlobalWorkerOptions.workerSrc) {
-    GlobalWorkerOptions.workerSrc = "/pdf.worker.mjs";
-  }
+  const workerSrc = await loadWorkerSrc();
+  GlobalWorkerOptions.workerSrc = workerSrc;
 
   return getDocument({
     data: new Uint8Array(buffer),
     disableWorker: true,
+    workerSrc,
     useWasm: false,
     isOffscreenCanvasSupported: false,
     isImageDecoderSupported: false,
