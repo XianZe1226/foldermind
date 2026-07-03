@@ -1,18 +1,45 @@
-import { GlobalWorkerOptions, getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import workerSrc from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import type { PdfExtractionResult } from "./types";
 
 const OCR_RENDER_SCALE = 1.8;
 const OCR_TEXT_MIN_LENGTH = 40;
 
-GlobalWorkerOptions.workerSrc = workerSrc;
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+
+let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+let workerSrcPromise: Promise<string> | null = null;
+
+function loadPdfJsModule(): Promise<PdfJsModule> {
+  if (!pdfJsModulePromise) {
+    pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs");
+  }
+
+  return pdfJsModulePromise;
+}
+
+function loadWorkerSrc(): Promise<string> {
+  if (!workerSrcPromise) {
+    workerSrcPromise = import("pdfjs-dist/legacy/build/pdf.worker.mjs?url").then(
+      (module) => module.default
+    );
+  }
+
+  return workerSrcPromise;
+}
 
 async function loadPdfDocument(buffer: ArrayBuffer) {
+  const [{ getDocument, GlobalWorkerOptions }, workerSrc] = await Promise.all([
+    loadPdfJsModule(),
+    loadWorkerSrc()
+  ]);
+
+  GlobalWorkerOptions.workerSrc = workerSrc;
+
   return getDocument({
-    data: new Uint8Array(buffer.slice(0)),
-    // Keep an explicit worker URL for reliable OCR page rendering in Vite/Tauri.
-    workerSrc
-  } as Parameters<typeof getDocument>[0]).promise;
+    data: new Uint8Array(buffer),
+    workerSrc,
+    // WKWebView 对新版 pdf.js worker 兼容性不稳定，这里直接在主线程解析。
+    disableWorker: true
+  } as Parameters<PdfJsModule["getDocument"]>[0]).promise;
 }
 
 function normalizedTextLength(text: string): number {
