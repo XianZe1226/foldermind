@@ -12,7 +12,7 @@ import {
   writeAnalysisBundle
 } from "./lib/backend";
 import { defaultOcrSettings, defaultSettings } from "./lib/constants";
-import { extractExcerpt, rawFileToDocument } from "./lib/file-utils";
+import { extractExcerpt, rawFileToDocument, type OcrProgress } from "./lib/file-utils";
 import { hasReadyOcrSettings } from "./lib/ocr";
 import {
   buildNoteArtifacts,
@@ -166,8 +166,17 @@ function App() {
         let parsedDocument = await parseDocumentForSummary(document, false, savedOcrSettings);
 
         if (shouldRunOcrForDocument(parsedDocument) && hasReadyOcrSettings(savedOcrSettings)) {
-          setStatusMessage(`正在 OCR 补读 ${index + 1} / ${documents.length}: ${document.name}`);
-          parsedDocument = await parseDocumentForSummary(document, true, savedOcrSettings);
+          setStatusMessage(
+            `正在 OCR 补读第 ${index + 1} / ${documents.length} 个文件：${document.name}`
+          );
+          parsedDocument = await parseDocumentForSummary(
+            document,
+            true,
+            savedOcrSettings,
+            (progress) => {
+              setStatusMessage(formatOcrProgress(index, documents.length, progress));
+            }
+          );
         }
 
         parsedDocuments.push({
@@ -456,7 +465,8 @@ async function parseRawFileForPreview(
 async function parseDocumentForSummary(
   document: DocumentRecord,
   enablePdfOcr: boolean,
-  ocrSettings: OcrSettings
+  ocrSettings: OcrSettings,
+  onOcrProgress?: (progress: OcrProgress) => void
 ): Promise<DocumentRecord> {
   const content = await loadFileContent(document.absolutePath, {
     includeBinary: document.type === ".docx" || (document.type === ".pdf" && enablePdfOcr)
@@ -475,7 +485,8 @@ async function parseDocumentForSummary(
     },
     {
       enableOcr: enablePdfOcr,
-      ocrSettings
+      ocrSettings,
+      onOcrProgress
     }
   );
 }
@@ -486,6 +497,17 @@ function shouldRunOcrForDocument(document: DocumentRecord): boolean {
     document.text.replace(/\s/g, "").length < 80 &&
     document.warnings.some((warning) => warning.includes("OCR") || warning.includes("文字层不足"))
   );
+}
+
+function formatOcrProgress(
+  documentIndex: number,
+  documentCount: number,
+  progress: OcrProgress
+): string {
+  const stageText = progress.stage === "recognizing" ? "正在调用 OCR 识别" : "正在把 PDF 页面转成图片";
+  const pageNumber = progress.pageIndex + 1;
+
+  return `${stageText}：第 ${documentIndex + 1} / ${documentCount} 个文件《${progress.fileName}》，PDF 第 ${pageNumber} / ${progress.totalPages || "?"} 页`;
 }
 
 export default App;

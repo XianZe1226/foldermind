@@ -1,8 +1,17 @@
 import type { PdfOcrRenderResult } from "./types";
 
-const OCR_RENDER_SCALE = 1.8;
+const OCR_RENDER_SCALE = 1.45;
+const OCR_JPEG_QUALITY = 0.84;
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+type PdfRenderProgressStage = "loading" | "rendering" | "rendered";
+
+interface PdfRenderProgress {
+  stage: PdfRenderProgressStage;
+  pageIndex: number;
+  processedPages: number;
+  totalPages: number;
+}
 
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 let workerSrcPromise: Promise<string> | null = null;
@@ -29,16 +38,34 @@ async function loadPdfDocument(buffer: ArrayBuffer) {
   const { getDocument, GlobalWorkerOptions } = await loadPdfJsModule();
   const workerSrc = await loadWorkerSrc();
   GlobalWorkerOptions.workerSrc = workerSrc;
-
-  return getDocument({
-    data: new Uint8Array(buffer),
-    disableWorker: true,
+  const data = new Uint8Array(buffer);
+  const baseOptions = {
+    data,
     workerSrc,
     useWasm: false,
     isOffscreenCanvasSupported: false,
     isImageDecoderSupported: false,
     useWorkerFetch: false
-  } as Parameters<PdfJsModule["getDocument"]>[0]).promise;
+  } as Parameters<PdfJsModule["getDocument"]>[0];
+
+  try {
+    return await getDocument(baseOptions).promise;
+  } catch (error) {
+    console.warn("PDF worker 加载失败，已切换到兼容渲染模式。", error);
+    return getDocument({
+      ...baseOptions,
+      data: new Uint8Array(buffer),
+      disableWorker: true
+    } as Parameters<PdfJsModule["getDocument"]>[0]).promise;
+  }
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, 0);
+    });
+  });
 }
 
 export async function renderPdfPagesForOcr(
@@ -101,6 +128,7 @@ export async function renderPdfPagesForOcrBatches(
     renderAllPages?: boolean;
     pageIndices?: number[];
     batchSize?: number;
+    onProgress?: (progress: PdfRenderProgress) => void;
   },
   onBatch: (imagesBase64: string[], pageIndices: number[]) => Promise<void>
 ): Promise<Omit<PdfOcrRenderResult, "imagesBase64" | "pageIndices">> {
@@ -130,6 +158,14 @@ export async function renderPdfPagesForOcrBatches(
       continue;
     }
 
+    options.onProgress?.({
+      stage: "loading",
+      pageIndex,
+      processedPages,
+      totalPages: pdf.numPages
+    });
+
+    await yieldToBrowser();
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
     const canvas = document.createElement("canvas");
@@ -142,6 +178,14 @@ export async function renderPdfPagesForOcrBatches(
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
 
+    options.onProgress?.({
+      stage: "rendering",
+      pageIndex,
+      processedPages,
+      totalPages: pdf.numPages
+    });
+
+    await yieldToBrowser();
     await page.render({
       canvas,
       canvasContext: context,
@@ -149,15 +193,24 @@ export async function renderPdfPagesForOcrBatches(
     }).promise;
 
     imagesBase64.push(
-      canvas.toDataURL("image/jpeg", 0.92).replace(/^data:image\/\w+;base64,/, "")
+      canvas.toDataURL("image/jpeg", OCR_JPEG_QUALITY).replace(/^data:image\/\w+;base64,/, "")
     );
     pageIndices.push(pageIndex);
 
     canvas.width = 0;
     canvas.height = 0;
 
+    options.onProgress?.({
+      stage: "rendered",
+      pageIndex,
+      processedPages: processedPages + imagesBase64.length,
+      totalPages: pdf.numPages
+    });
+
+    await yieldToBrowser();
     if (imagesBase64.length >= batchSize) {
       await flushBatch();
+      await yieldToBrowser();
     }
   }
 

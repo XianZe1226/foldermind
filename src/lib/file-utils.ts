@@ -8,6 +8,15 @@ import type { DocumentRecord, OcrSettings, RawScannedFile } from "./types";
 interface ParseDocumentOptions {
   ocrSettings?: OcrSettings;
   enableOcr?: boolean;
+  onOcrProgress?: (progress: OcrProgress) => void;
+}
+
+export interface OcrProgress {
+  fileName: string;
+  stage: "rendering" | "recognizing";
+  pageIndex: number;
+  processedPages: number;
+  totalPages: number;
 }
 
 export function formatBytes(size: number): string {
@@ -89,20 +98,46 @@ export async function rawFileToDocument(
         try {
           const ocrPageTexts: string[] = [];
           const ocrPageIndices: number[] = [];
+          let ocrTotalPages = backendPageTexts.length;
+          let recognizedPages = 0;
           const renderStats = await renderPdfPagesForOcrBatches(
             base64ToArrayBuffer(file.binaryBase64),
             {
               pageIndices:
                 pageIndicesNeedingOcr.length > 0 ? pageIndicesNeedingOcr : undefined,
               renderAllPages: backendExtractionFailed || backendPageTexts.length === 0,
-              batchSize: 1
+              batchSize: 1,
+              onProgress: (progress) => {
+                if (progress.stage === "rendered") {
+                  return;
+                }
+
+                ocrTotalPages = progress.totalPages;
+                options.onOcrProgress?.({
+                  fileName: file.name,
+                  stage: "rendering",
+                  pageIndex: progress.pageIndex,
+                  processedPages: progress.processedPages,
+                  totalPages: progress.totalPages
+                });
+              }
             },
             async (imagesBase64, pageIndices) => {
+              pageIndices.forEach((pageIndex) => {
+                options.onOcrProgress?.({
+                  fileName: file.name,
+                  stage: "recognizing",
+                  pageIndex,
+                  processedPages: recognizedPages,
+                  totalPages: ocrTotalPages
+                });
+              });
               const ocrResult = await extractTextWithOcr(imagesBase64, ocrSettings);
               pageIndices.forEach((pageIndex, resultIndex) => {
                 ocrPageIndices.push(pageIndex);
                 ocrPageTexts.push(ocrResult.pageTexts[resultIndex] ?? "");
               });
+              recognizedPages += pageIndices.length;
             }
           );
           const mergedText = sanitizeText(
