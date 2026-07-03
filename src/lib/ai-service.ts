@@ -18,6 +18,13 @@ interface RemoteFolderPayload {
   categories: Array<{ name: string; description: string; noteCount: number }>;
 }
 
+interface StudyScope {
+  subjectLabel: string;
+  documents: DocumentRecord[];
+  notes: GeneratedNote[];
+  excludedDocuments: DocumentRecord[];
+}
+
 export async function generateNotesFromDocuments(
   documents: DocumentRecord[],
   settings: ProviderSettings,
@@ -27,9 +34,10 @@ export async function generateNotesFromDocuments(
     throw new Error("请先在设置页保存当前模型的 API Key，再开始总结。");
   }
 
+  const documentScope = selectDominantDocumentScope(documents);
   const notes: GeneratedNote[] = [];
 
-  for (const document of documents) {
+  for (const document of documentScope.documents) {
     const payload = await requestSingleNote(document, settings);
     const now = Date.now();
     notes.push({
@@ -60,7 +68,17 @@ export async function generateNotesFromDocuments(
     });
   }
 
-  const overviewPayload = await requestFolderSummary(folderName, notes, documents, settings);
+  const studyScope: StudyScope = {
+    ...documentScope,
+    notes
+  };
+  const overviewPayload = await requestFolderSummary(
+    folderName,
+    studyScope.notes,
+    studyScope.documents,
+    settings,
+    studyScope
+  );
   const generatedAt = Date.now();
   const summary: ImportSummary = {
     folderName,
@@ -72,10 +90,11 @@ export async function generateNotesFromDocuments(
   };
   const reviewMarkdown = await requestReviewSummaryMarkdown(
     folderName,
-    documents,
-    notes,
+    studyScope.documents,
+    studyScope.notes,
     summary,
-    settings
+    settings,
+    studyScope
   );
 
   return {
@@ -96,10 +115,11 @@ async function requestSingleNote(document: DocumentRecord, settings: ProviderSet
     "3. content 必须是尽可能短的 Markdown 笔记，优先保留最关键的考点信息，尽量控制总长度在 120-220 字。",
     "4. content 至少包含“AI 摘要”“关键要点”“后续动作”三个二级标题，但每节都必须极短。",
     "5. 如果正文内容不足，请明确指出不足，不要编造细节。",
+    "6. 如果这是试卷、题库、真题或练习题资料，只总结它考到的知识点、题型套路和易错点；不要复述题干、选项、整段答案或原卷内容。",
     `文件名: ${document.name}`,
     `相对路径: ${document.relativePath}`,
     `抽取状态: ${document.warnings.length ? document.warnings.join("；") : "正文抽取正常"}`,
-    `正文: ${trimForModel(document.text, 12000)}`
+    `正文: ${trimForSingleNote(document)}`
   ].join("\n");
 
   try {
@@ -113,19 +133,21 @@ async function requestFolderSummary(
   folderName: string,
   notes: GeneratedNote[],
   documents: DocumentRecord[],
-  settings: ProviderSettings
+  settings: ProviderSettings,
+  studyScope: StudyScope
 ) {
   const prompt = [
     "你是一个知识管理助手，请根据已经生成的文档笔记，输出整个文件夹的整理报告。",
     "只返回 JSON，不要输出 Markdown 代码块。",
     '字段: overview(string), recommendedOrder(string[]), highlights(string[]), categories([{name,description,noteCount}])',
     "要求:",
-    "1. overview 需要能直接放进报告首页，先判断文件夹是否混有多学科内容。",
-    "2. 如果混有多学科，只围绕文件数量最多、内容最成体系的一门学科作为主学科来组织报告，其他零散学科只在一句话里说明被弱化处理。",
+    `1. 本轮已经按文件数量判定主学科为“${studyScope.subjectLabel}”，overview 必须围绕这个主学科。`,
+    "2. 如果文件夹混有其他学科，只能一句话说明已排除，不能展开整理无关学科内容。",
     "3. highlights 输出 4-8 条重要发现，优先写主学科的重点、难点和复习风险。",
     "4. categories 中的 description 要具体，不要空泛。",
     `文件夹名: ${folderName}`,
-    `总文件数: ${documents.length}`,
+    `主学科文件数: ${documents.length}`,
+    `已排除无关文件数: ${studyScope.excludedDocuments.length}`,
     `笔记摘要数据: ${JSON.stringify(
       notes.map((note) => ({
         title: note.title,
@@ -163,7 +185,8 @@ async function requestReviewSummaryMarkdown(
   documents: DocumentRecord[],
   notes: GeneratedNote[],
   summary: ImportSummary,
-  settings: ProviderSettings
+  settings: ProviderSettings,
+  studyScope: StudyScope
 ) {
   const sourcePacket = buildReviewSourcePacket(documents, notes);
   const minCharacters = calculateReviewMinCharacters(notes, documents);
@@ -173,19 +196,23 @@ async function requestReviewSummaryMarkdown(
     "要求:",
     "1. 标题使用一级标题。",
     "2. 这是给一个此前完全没学过这门课、但现在马上要去做题的人看的，唯一目标是让他尽快抓住会考知识点并直接上手做题。",
-    "3. 如果检测到混有多学科内容，只选择文件数量最多、内容最成体系的一门学科作为最终总结主线，其他学科最多用一小段说明已弱化处理。",
-    "4. 全文必须尽最大可能长、尽最大可能全面、尽最大可能覆盖更多高频考点；如果资料足够，宁可写得很长，也不要过度压缩。",
-    "5. 严禁写任何时间安排、学习计划、按天安排、阶段安排、先后任务、Day 1/2/3、今天/明天/后天、复习路线、冲刺安排等内容。",
-    "6. 必须严格以资料里实际出现的知识点为基准，不要带入资料之外的课程知识，不要编造可能会考但材料没提到的内容。",
-    "7. 输出必须至少包含这些二级标题：这门课会考什么、核心考点总图、必会知识点清单、高频考点逐条展开、必背定义 / 公式 / 规则、易错易混辨析、题型拆解与作答要点、最后一遍考点速览、资料缺口。",
-    "8. 在“高频考点逐条展开”里尽可能按主题分组，把高频知识点逐条展开；每个点尽量写清：它是什么、常见怎么考、题目里出现什么词要想到它、作答时必须写出的关键词、最容易错在哪里。",
-    "9. 在“题型拆解与作答要点”里不要安排顺序，而是直接总结不同题型看到什么就该写什么。",
-    "10. 目标是做出一份可以直接拿去刷题的总讲义，而不是学习规划。",
-    "11. 如果材料不完整，要明确指出缺口，但仍优先把已有可考知识点整理全。",
+    `3. 当前主学科已经按文件数量判定为“${studyScope.subjectLabel}”。只总结这个主学科。其他学科资料已排除，严禁展开无关学科。`,
+    "4. 如果资料里有试卷、题库、真题、选择题、填空题、简答题，只抽取“考了哪些知识点、题型怎么识别、做题步骤怎么写、易错点是什么”；严禁复述整张试卷、题干、选项、原答案。",
+    "5. 全文必须尽最大可能长、尽最大可能全面、尽最大可能覆盖更多高频考点；把 token 用在知识点解释、做题方法、题眼识别和易错辨析上。",
+    "6. 严禁写任何时间安排、学习计划、按天安排、阶段安排、先后任务、Day 1/2/3、今天/明天/后天、复习路线、冲刺安排等内容。",
+    "7. 必须严格以资料里实际出现的知识点为基准，不要带入资料之外的课程知识，不要编造可能会考但材料没提到的内容。",
+    "8. 输出必须至少包含这些二级标题：这门课会考什么、核心考点总图、必会知识点清单、高频考点逐条展开、必背定义 / 公式 / 规则、易错易混辨析、题型拆解与作答要点、最后一遍考点速览、资料缺口。",
+    "9. 在“高频考点逐条展开”里尽可能按主题分组，把高频知识点逐条展开；每个点尽量写清：它是什么、常见怎么考、题目里出现什么词要想到它、作答时必须写出的关键词、最容易错在哪里。",
+    "10. 在“题型拆解与作答要点”里不要安排顺序，而是直接总结不同题型看到什么就该写什么。",
+    "11. 目标是做出一份可以直接拿去刷题的总讲义，而不是学习规划。",
+    "12. 如果材料不完整，要明确指出缺口，但仍优先把已有可考知识点整理全。",
     `文件夹名: ${folderName}`,
+    `主学科: ${studyScope.subjectLabel}`,
+    `主学科资料数: ${documents.length}`,
+    `已排除无关资料数: ${studyScope.excludedDocuments.length}`,
+    `排除的无关资料: ${studyScope.excludedDocuments.map((document) => document.relativePath).join("；") || "无"}`,
     `整体总览: ${summary.overview}`,
     `重点发现: ${summary.highlights.join("；")}`,
-    `推荐阅读顺序: ${summary.recommendedOrder.join(" -> ")}`,
     `笔记数据: ${JSON.stringify(
       notes.map((note) => ({
         title: note.title,
@@ -216,6 +243,7 @@ async function requestReviewSummaryMarkdown(
         (
           await rewriteAsKnowledgeOnlyMarkdown(
             folderName,
+            studyScope.subjectLabel,
             candidate,
             sourcePacket,
             settings,
@@ -538,20 +566,119 @@ function buildReviewSourcePacket(documents: DocumentRecord[], notes: GeneratedNo
   return notes
     .map((note, index) => {
       const source = documentMap.get(note.documentId);
+      const sourceText = source?.text ? trimForReviewSource(source, 1800) : "正文抽取不足";
       return [
         `### 资料 ${index + 1}: ${note.title}`,
         `- 分类: ${note.category}`,
         `- 摘要: ${note.summary}`,
         `- 关键词: ${note.keywords.join("、") || note.tags.join("、") || "无"}`,
         `- 来源文件: ${source?.relativePath ?? "未知文件"}`,
-        `- 原文摘录: ${source?.text ? trimForModel(source.text, 1400) : "正文抽取不足"}`
+        `- 可用考点材料: ${sourceText}`
       ].join("\n");
     })
     .join("\n\n");
 }
 
+function trimForSingleNote(document: DocumentRecord): string {
+  if (isExamLikeDocument(document)) {
+    return compactExamText(document.text, 5000);
+  }
+
+  return trimForModel(document.text, 9000);
+}
+
+function trimForReviewSource(document: DocumentRecord, maxLength: number): string {
+  if (isExamLikeDocument(document)) {
+    return compactExamText(document.text, maxLength);
+  }
+
+  return trimForModel(document.text, maxLength);
+}
+
+function isExamLikeDocument(document: DocumentRecord): boolean {
+  const haystack = `${document.name} ${document.relativePath} ${document.text.slice(0, 4000)}`;
+  return /(试卷|真题|题库|习题|练习|模拟题|选择题|填空题|判断题|简答题|论述题|答案|解析|单项选择|多项选择)/i.test(
+    haystack
+  );
+}
+
+function compactExamText(text: string, maxLength: number): string {
+  if (!text.trim()) {
+    return "正文为空，请基于文件名和路径做保守判断。";
+  }
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const usefulLines: string[] = [];
+  const keywordBank = new Set<string>();
+
+  for (const line of lines) {
+    if (looksLikeQuestionBoilerplate(line) || looksLikeOptionLine(line)) {
+      collectExamKeywords(line, keywordBank);
+      continue;
+    }
+
+    if (line.length > 180 && /(题|答案|解析|选项|正确|错误|下列|关于)/.test(line)) {
+      collectExamKeywords(line, keywordBank);
+      continue;
+    }
+
+    if (
+      line.length <= 180 ||
+      /定义|特点|原则|步骤|方法|公式|规则|区别|联系|原因|意义|作用|条件|分类|范式|事务|SQL|关系|索引|并发|完整性/.test(
+        line
+      )
+    ) {
+      usefulLines.push(line);
+      collectExamKeywords(line, keywordBank);
+    }
+  }
+
+  const compact = [
+    "这是一份试卷/题库/练习资料。下面只保留可用于复习的考点信号，已压缩题干、选项和重复答案：",
+    keywordBank.size ? `高频题眼/关键词: ${[...keywordBank].slice(0, 80).join("、")}` : "",
+    ...usefulLines.slice(0, 80)
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return trimForModel(compact || text, maxLength);
+}
+
+function looksLikeQuestionBoilerplate(line: string): boolean {
+  return (
+    /^(\d+|[一二三四五六七八九十]+)[\.、)]/.test(line) ||
+    /^(第\s*\d+\s*题|单项选择|多项选择|判断题|填空题|简答题|论述题|答案[:：]|解析[:：])/.test(
+      line
+    ) ||
+    /(下列|以下|关于|正确的是|错误的是|不正确的是|属于|不属于|应选|得分|分值)/.test(line)
+  );
+}
+
+function looksLikeOptionLine(line: string): boolean {
+  return /^[A-H][\.、)]\s*/i.test(line) || /^选项\s*[A-H]/i.test(line);
+}
+
+function collectExamKeywords(line: string, keywordBank: Set<string>) {
+  const matches = line.match(/[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_-]{1,14}/g) ?? [];
+  for (const match of matches) {
+    if (
+      match.length >= 2 &&
+      !/^(下列|以下|关于|正确|错误|答案|解析|选项|属于|不属于|一个|一种|可以|进行|的是|不是)$/.test(
+        match
+      )
+    ) {
+      keywordBank.add(match);
+    }
+  }
+}
+
 async function rewriteAsKnowledgeOnlyMarkdown(
   folderName: string,
+  subjectLabel: string,
   currentContent: string,
   sourcePacket: string,
   settings: ProviderSettings,
@@ -560,20 +687,22 @@ async function rewriteAsKnowledgeOnlyMarkdown(
 ): Promise<string> {
   return requestText(
     [
-      `请把下面这份《${folderName}》复习稿重写为“纯知识点 / 纯考点总讲义”。`,
+      `请把下面这份《${folderName}》复习稿重写为“${subjectLabel}纯知识点 / 纯考点总讲义”。`,
       "要求：",
       `1. 删除所有时间安排、按天安排、学习步骤、先后任务、冲刺路线、Day 1/2/3、今天/明天/后天、三天突击、复习安排、复习路线。`,
       `2. 最终正文长度必须不少于 ${minCharacters} 个中文字符，优先增加高频考点解释和做题步骤，不要增加空话。`,
       "3. 只保留最纯粹的考试相关内容：会考什么、概念定义、公式规则、易错点、题型作答要点、最后速览。",
       "4. 每个知识点都尽量写清：它是什么、常见怎么考、看到什么题眼要想到它、作答时必须写出的关键词、容易错在哪里、答题步骤怎么展开。",
-      "5. 必须严格基于资料内容，不要引入资料外知识。",
-      "6. 直接输出 Markdown 正文，不要解释你做了什么。",
-      `7. 当前版本未达标原因：长度=${assessment.characterCount}，覆盖率=${Math.round(
+      `5. 只围绕“${subjectLabel}”展开；如果当前版本含其他学科内容，必须删除。`,
+      "6. 如果当前版本含试卷题干、选项、整段原答案，必须改写成考点、题眼、做题步骤和易错点。",
+      "7. 必须严格基于资料内容，不要引入资料外知识。",
+      "8. 直接输出 Markdown 正文，不要解释你做了什么。",
+      `9. 当前版本未达标原因：长度=${assessment.characterCount}，覆盖率=${Math.round(
         assessment.coverageRatio * 100
-      )}%${assessment.hasScheduleContent ? "，含安排内容" : ""}。`,
+      )}%${assessment.hasScheduleContent ? "，含安排内容" : ""}${assessment.hasExamDumpContent ? "，含试卷原文/选项/答案堆砌" : ""}。`,
       assessment.missingTopics.length
-        ? `8. 下面这些知识点当前覆盖不足，必须补进去并展开：${assessment.missingTopics.join("、")}`
-        : "8. 当前没有检测到明显缺失的标题，但你仍需继续扩充解释深度。",
+        ? `10. 下面这些知识点当前覆盖不足，必须补进去并展开：${assessment.missingTopics.join("、")}`
+        : "10. 当前没有检测到明显缺失的标题，但你仍需继续扩充解释深度。",
       "",
       "当前版本：",
       currentContent,
@@ -615,10 +744,80 @@ function sanitizeReviewMarkdown(content: string): string {
       continue;
     }
 
+    if (looksLikeExamDumpLine(trimmed)) {
+      continue;
+    }
+
     cleaned.push(line);
   }
 
   return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function selectDominantDocumentScope(
+  documents: DocumentRecord[]
+): Omit<StudyScope, "notes"> {
+  const bySubject = new Map<string, DocumentRecord[]>();
+  for (const document of documents) {
+    const subject = inferSubjectLabel(document);
+    const bucket = bySubject.get(subject) ?? [];
+    bucket.push(document);
+    bySubject.set(subject, bucket);
+  }
+
+  const rankedSubjects = [...bySubject.entries()].sort((left, right) => {
+    const countDelta = right[1].length - left[1].length;
+    if (countDelta !== 0) {
+      return countDelta;
+    }
+
+    return subjectTextWeight(right[1]) - subjectTextWeight(left[1]);
+  });
+
+  const [subjectLabel, scopedDocuments] = rankedSubjects[0] ?? ["综合资料", documents];
+  const scopedDocumentIds = new Set(scopedDocuments.map((document) => document.id));
+  const excludedDocuments = documents.filter((document) => !scopedDocumentIds.has(document.id));
+
+  return {
+    subjectLabel,
+    documents: scopedDocuments,
+    excludedDocuments
+  };
+}
+
+function inferSubjectLabel(document: DocumentRecord): string {
+  const haystack = `${document.relativePath} ${document.name} ${document.text.slice(0, 2600)}`;
+  const subjectPatterns: Array<[string, RegExp]> = [
+    ["数据库", /(数据库|关系模型|关系代数|SQL|事务|并发控制|范式|ER图|索引|视图|存储过程|触发器|主键|外键|关系模式)/i],
+    ["马克思主义基本原理", /(马原|马克思|恩格斯|剩余价值|唯物|辩证法|资本主义|社会主义|认识论|实践|矛盾|生产力|生产关系)/i],
+    ["计算机网络", /(计算机网络|TCP|UDP|IP|HTTP|DNS|路由|交换机|网络层|传输层|拥塞控制|子网)/i],
+    ["操作系统", /(操作系统|进程|线程|死锁|调度|内存管理|页表|虚拟内存|文件系统|信号量|PV操作)/i],
+    ["数据结构", /(数据结构|链表|栈|队列|树|二叉树|图|排序|查找|堆|哈希|遍历)/i],
+    ["软件工程", /(软件工程|需求分析|UML|用例|测试|维护|概要设计|详细设计|项目管理|瀑布|敏捷)/i],
+    ["高等数学", /(高等数学|极限|导数|微分|积分|级数|偏导|多元函数|微分方程)/i],
+    ["线性代数", /(线性代数|矩阵|行列式|向量|特征值|特征向量|线性相关|秩|方程组)/i],
+    ["概率论", /(概率论|随机变量|分布函数|期望|方差|协方差|正态分布|假设检验|置信区间)/i],
+    ["大学英语", /(英语|完形|阅读理解|翻译|作文|词汇|语法|听力|CET|四级|六级)/i],
+    ["Java", /(Java|JVM|面向对象|继承|多态|接口|异常|泛型|集合|线程|Spring)/i],
+    ["Python", /(Python|NumPy|Pandas|Django|Flask|装饰器|生成器|列表推导|爬虫)/i]
+  ];
+
+  for (const [label, pattern] of subjectPatterns) {
+    if (pattern.test(haystack)) {
+      return label;
+    }
+  }
+
+  const pathParts = document.relativePath
+    .split(/[\/\\\s_-]+/)
+    .map((part) => part.trim())
+    .filter((part) => /[\u4e00-\u9fa5]/.test(part) && part.length >= 2 && part.length <= 10);
+
+  return pathParts[0] ?? "综合资料";
+}
+
+function subjectTextWeight(documents: DocumentRecord[]): number {
+  return documents.reduce((sum, document) => sum + Math.min(document.text.length, 6000), 0);
 }
 
 interface ReviewAssessment {
@@ -628,6 +827,7 @@ interface ReviewAssessment {
   coveredTopics: string[];
   missingTopics: string[];
   hasScheduleContent: boolean;
+  hasExamDumpContent: boolean;
 }
 
 function assessReviewMarkdown(
@@ -652,15 +852,43 @@ function assessReviewMarkdown(
     /(Day\s*\d|按天|复习安排|学习安排|时间安排|冲刺安排|复习路线|第一天|第二天|第三天|今天|明天|后天|三天突击)/i.test(
       content
     );
+  const hasExamDumpContent = detectExamDumpContent(content);
 
   return {
-    pass: normalized.length >= minCharacters && coverageRatio >= 0.9 && !hasScheduleContent,
+    pass:
+      normalized.length >= minCharacters &&
+      coverageRatio >= 0.9 &&
+      !hasScheduleContent &&
+      !hasExamDumpContent,
     characterCount: normalized.length,
     coverageRatio,
     coveredTopics,
     missingTopics,
-    hasScheduleContent
+    hasScheduleContent,
+    hasExamDumpContent
   };
+}
+
+function detectExamDumpContent(content: string): boolean {
+  const lines = content.split("\n").map((line) => line.trim()).filter(Boolean);
+  const suspiciousLines = lines.filter(looksLikeExamDumpLine);
+  return suspiciousLines.length >= 4;
+}
+
+function looksLikeExamDumpLine(line: string): boolean {
+  if (!line) {
+    return false;
+  }
+
+  return (
+    /^[A-H][\.、)]\s*/i.test(line) ||
+    /^答案[:：]\s*[A-H对错√×]/i.test(line) ||
+    /^解析[:：]/.test(line) ||
+    /^(\d+|[一二三四五六七八九十]+)[\.、)]\s*.*(下列|以下|正确的是|错误的是|不正确的是|属于|不属于)/.test(
+      line
+    ) ||
+    /(A[\.、)].*B[\.、)].*C[\.、)]|A\..*B\..*C\.)/.test(line)
+  );
 }
 
 function calculateReviewMinCharacters(
@@ -734,7 +962,7 @@ function buildFallbackReviewMarkdown(
     ...notes.map((note) => {
       const source = documentMap.get(note.documentId);
       const sourceSnippet = source?.text
-        ? trimSentence(source.text, 260)
+        ? trimSentence(trimForReviewSource(source, 600), 260)
         : "当前文件正文抽取不足，建议回原文件补读。";
       return [
         `### ${note.title}`,
@@ -797,7 +1025,7 @@ function buildForcedCoverageReviewMarkdown(
     ...notes.flatMap((note) => {
       const source = documentMap.get(note.documentId);
       const sourceSnippet = source?.text
-        ? trimForModel(source.text, 1800)
+        ? trimForReviewSource(source, 1800)
         : "当前文件正文抽取不足，建议回原文件补读。";
       return [
         `### ${note.title}`,
