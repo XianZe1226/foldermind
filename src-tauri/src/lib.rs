@@ -1,5 +1,6 @@
 use std::{
     fs,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, UNIX_EPOCH},
@@ -240,8 +241,16 @@ fn open_local_path(target_path: String) -> Result<(), String> {
 #[command]
 fn extract_pdf_text(pdf_path: String) -> Result<PdfTextExtractionResult, String> {
     let pdf_bytes = fs::read(&pdf_path).map_err(|error| format!("无法读取 PDF 文件: {error}"))?;
-    let extracted_text = pdf_extract::extract_text_from_mem(&pdf_bytes)
-        .map_err(|error| format!("后端 PDF 文本抽取失败: {error}"))?;
+    let extracted_text = match catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(&pdf_bytes)
+    })) {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => return Err(format!("后端 PDF 文本抽取失败: {error}")),
+        Err(payload) => {
+            let message = panic_payload_to_string(payload);
+            return Err(format!("后端 PDF 文本抽取崩溃，已跳过文字层: {message}"));
+        }
+    };
     let page_texts = split_pdf_pages(&extracted_text);
 
     Ok(PdfTextExtractionResult {
@@ -249,6 +258,18 @@ fn extract_pdf_text(pdf_path: String) -> Result<PdfTextExtractionResult, String>
         total_pages: page_texts.len() as u32,
         page_texts,
     })
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return message.to_string();
+    }
+
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+
+    "未知 PDF 解析异常".to_string()
 }
 
 #[command]
