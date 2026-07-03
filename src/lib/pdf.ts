@@ -1,21 +1,37 @@
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import workerSrc from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
+import type { PdfExtractionResult } from "./types";
 
 const OCR_RENDER_SCALE = 1.8;
+const OCR_TEXT_MIN_LENGTH = 40;
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
 async function loadPdfDocument(buffer: ArrayBuffer) {
   return getDocument({
-    data: buffer,
+    data: new Uint8Array(buffer.slice(0)),
     // Keep an explicit worker URL for reliable OCR page rendering in Vite/Tauri.
     workerSrc
   } as Parameters<typeof getDocument>[0]).promise;
 }
 
-export async function extractPdfText(buffer: ArrayBuffer): Promise<string> {
+function normalizedTextLength(text: string): number {
+  return text.replace(/\s/g, "").length;
+}
+
+function shouldUseOcrForPage(text: string): boolean {
+  return normalizedTextLength(text) < OCR_TEXT_MIN_LENGTH;
+}
+
+export async function extractPdfPayload(
+  buffer: ArrayBuffer,
+  options: { renderAllPages?: boolean } = {}
+): Promise<PdfExtractionResult> {
   const pdf = await loadPdfDocument(buffer);
   const pageTexts: string[] = [];
+  const imagesBase64: string[] = [];
+  const renderAllPages = options.renderAllPages ?? false;
+  let ocrCandidatePages = 0;
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
@@ -23,26 +39,20 @@ export async function extractPdfText(buffer: ArrayBuffer): Promise<string> {
     const text = content.items
       .map((item) => ("str" in item ? item.str : ""))
       .filter(Boolean)
-      .join(" ");
+      .join(" ")
+      .trim();
 
-    if (text.trim()) {
-      pageTexts.push(text.trim());
+    pageTexts.push(text);
+
+    const pageLooksScanned = shouldUseOcrForPage(text);
+    if (pageLooksScanned) {
+      ocrCandidatePages += 1;
     }
-  }
 
-  return pageTexts.join("\n");
-}
+    if (!renderAllPages && !pageLooksScanned) {
+      continue;
+    }
 
-export async function renderPdfPagesForOcr(
-  buffer: ArrayBuffer,
-  maxPages = 8
-): Promise<{ imagesBase64: string[]; processedPages: number; totalPages: number }> {
-  const pdf = await loadPdfDocument(buffer);
-  const processedPages = Math.min(pdf.numPages, maxPages);
-  const imagesBase64: string[] = [];
-
-  for (let pageNumber = 1; pageNumber <= processedPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
@@ -69,8 +79,12 @@ export async function renderPdfPagesForOcr(
   }
 
   return {
+    text: pageTexts.filter(Boolean).join("\n\n"),
+    pageTexts,
     imagesBase64,
-    processedPages,
-    totalPages: pdf.numPages
+    processedPages: imagesBase64.length,
+    totalPages: pdf.numPages,
+    ocrCandidatePages: renderAllPages ? pdf.numPages : ocrCandidatePages,
+    ocrTruncated: false
   };
 }

@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - os: macos-15
-            bundleArgs: --bundles dmg
+            bundleArgs: --target aarch64-apple-darwin --bundles dmg
           - os: windows-latest
             bundleArgs: --target x86_64-pc-windows-msvc --bundles nsis
     runs-on: ${{ matrix.os }}
@@ -46,7 +46,7 @@ jobs:
             Automated release for FolderMind.
 
             Included artifacts:
-            - macOS installer
+            - macOS Apple Silicon installer
             - Windows x86_64 installer
           releaseDraft: false
           prerelease: false

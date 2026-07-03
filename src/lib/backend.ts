@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   OcrSettings,
-  PdfExtractionResult,
+  OcrResult,
   RawScannedFile,
   SaveResult,
   SavedArtifact
@@ -33,16 +33,6 @@ export async function writeAnalysisBundle(
   });
 }
 
-export async function extractPdfPayload(
-  pdfPath: string,
-  maxPages = 0
-): Promise<PdfExtractionResult> {
-  return invoke<PdfExtractionResult>("extract_pdf_payload", {
-    pdfPath,
-    maxPages
-  });
-}
-
 export async function openLocalPath(targetPath: string): Promise<void> {
   return invoke("open_local_path", {
     targetPath
@@ -52,9 +42,9 @@ export async function openLocalPath(targetPath: string): Promise<void> {
 export async function performOcr(
   imagesBase64: string[],
   settings: OcrSettings
-): Promise<string> {
+): Promise<OcrResult> {
   try {
-    return await invoke<string>("perform_ocr", {
+    return await invoke<OcrResult>("perform_ocr", {
       imagesBase64,
       provider: settings.provider,
       apiKey: settings.apiKey,

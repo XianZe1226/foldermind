@@ -1,16 +1,14 @@
 use std::{
     fs,
-    io::Write,
-    process::Command,
-    process::Stdio,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    process::Command,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use reqwest::blocking::Client;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::command;
 use walkdir::WalkDir;
 
@@ -46,22 +44,28 @@ struct SaveResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PdfExtractionResult {
+struct OcrResult {
     text: String,
-    images_base64: Vec<String>,
-    processed_pages: u32,
-    total_pages: u32,
-    ocr_candidate_pages: u32,
-    ocr_truncated: bool,
+    page_texts: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OcrRequest {
-    images_base64: Vec<String>,
-    provider: String,
-    api_key: String,
-    secret_key: String,
+#[derive(Debug, Deserialize)]
+struct BaiduTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaiduOcrWord {
+    words: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaiduOcrResponse {
+    error_code: Option<i64>,
+    error_msg: Option<String>,
+    words_result: Option<Vec<BaiduOcrWord>>,
 }
 
 #[command]
@@ -175,64 +179,6 @@ fn write_analysis_bundle(
 }
 
 #[command]
-fn extract_pdf_payload(pdf_path: String, max_pages: u32) -> Result<PdfExtractionResult, String> {
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(PDF_HELPER_SCRIPT)
-        .arg(&pdf_path)
-        .arg(max_pages.to_string())
-        .output()
-        .map_err(|error| format!("无法启动本地 PDF 解析器: {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "本地 PDF 解析器执行失败。".to_string()
-        } else {
-            format!("本地 PDF 解析器执行失败: {stderr}")
-        });
-    }
-
-    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
-    let payload: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-
-    Ok(PdfExtractionResult {
-        text: payload
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        images_base64: payload
-            .get("imagesBase64")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToString::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        processed_pages: payload
-            .get("processedPages")
-            .and_then(Value::as_u64)
-            .unwrap_or_default() as u32,
-        total_pages: payload
-            .get("totalPages")
-            .and_then(Value::as_u64)
-            .unwrap_or_default() as u32,
-        ocr_candidate_pages: payload
-            .get("ocrCandidatePages")
-            .and_then(Value::as_u64)
-            .unwrap_or_default() as u32,
-        ocr_truncated: payload
-            .get("ocrTruncated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-#[command]
 fn open_local_path(target_path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -268,51 +214,111 @@ fn perform_ocr(
     provider: String,
     api_key: String,
     secret_key: String,
-) -> Result<String, String> {
-    let payload = serde_json::to_string(&OcrRequest {
-        images_base64,
-        provider,
-        api_key,
-        secret_key,
+) -> Result<OcrResult, String> {
+    let provider = provider.trim().to_lowercase();
+    if provider != "baidu" {
+        return Err("暂不支持当前 OCR 服务商。".to_string());
+    }
+
+    let api_key = api_key.trim().to_string();
+    let secret_key = secret_key.trim().to_string();
+    if api_key.is_empty() || secret_key.is_empty() {
+        return Err("OCR 配置未保存完整，请补全 API Key 和 Secret Key。".to_string());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|error| format!("OCR 网络客户端初始化失败: {error}"))?;
+
+    let token_response = client
+        .post("https://aip.baidubce.com/oauth/2.0/token")
+        .query(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", api_key.as_str()),
+            ("client_secret", secret_key.as_str()),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| format!("百度 OCR 鉴权失败: {error}"))?;
+
+    let token_status = token_response.status();
+    let token_payload = token_response
+        .json::<BaiduTokenResponse>()
+        .map_err(|error| format!("百度 OCR 鉴权响应解析失败: {error}"))?;
+
+    if !token_status.is_success() {
+        let message = token_payload
+            .error_description
+            .or(token_payload.error)
+            .unwrap_or_else(|| format!("HTTP {}", token_status.as_u16()));
+        return Err(format!("百度 OCR 鉴权失败: {message}"));
+    }
+
+    let access_token = token_payload.access_token.ok_or_else(|| {
+        let message = token_payload
+            .error_description
+            .or(token_payload.error)
+            .unwrap_or_else(|| "未返回 access_token".to_string());
+        format!("百度 OCR 鉴权失败: {message}")
+    })?;
+
+    let mut page_texts = Vec::with_capacity(images_base64.len());
+
+    for image_base64 in images_base64 {
+        let response = client
+            .post(format!(
+                "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token={access_token}"
+            ))
+            .header("Accept", "application/json")
+            .form(&[("image", image_base64)])
+            .send()
+            .map_err(|error| format!("百度 OCR 请求失败: {error}"))?;
+
+        let status = response.status();
+        let payload = response
+            .json::<BaiduOcrResponse>()
+            .map_err(|error| format!("百度 OCR 响应解析失败: {error}"))?;
+
+        if !status.is_success() {
+            let message = payload
+                .error_msg
+                .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+            return Err(format!("百度 OCR 请求失败: {message}"));
+        }
+
+        if payload.error_code.is_some() {
+            return Err(format!(
+                "百度 OCR 请求失败: {}",
+                payload
+                    .error_msg
+                    .unwrap_or_else(|| "服务端返回错误".to_string())
+            ));
+        }
+
+        let page_text = payload
+            .words_result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| item.words)
+            .map(|words| words.trim().to_string())
+            .filter(|words| !words.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        page_texts.push(page_text);
+    }
+
+    Ok(OcrResult {
+        text: page_texts
+            .iter()
+            .filter(|text| !text.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        page_texts,
     })
-    .map_err(|error| error.to_string())?;
-
-    let mut child = Command::new("python3")
-        .arg("-c")
-        .arg(OCR_HELPER_SCRIPT)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("无法启动本地 OCR 处理器: {error}"))?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(payload.as_bytes())
-            .map_err(|error| format!("无法向 OCR 处理器传输数据: {error}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("OCR 处理器执行失败: {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "OCR 处理器执行失败。".to_string()
-        } else {
-            stderr
-        });
-    }
-
-    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
-    let payload: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-
-    Ok(payload
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string())
 }
 
 fn read_text_file(path: &Path) -> Result<String, String> {
@@ -338,133 +344,9 @@ pub fn run() {
             pick_folder,
             scan_folder,
             write_analysis_bundle,
-            extract_pdf_payload,
             open_local_path,
             perform_ocr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
-const PDF_HELPER_SCRIPT: &str = r#"
-import base64
-import io
-import json
-import sys
-
-pdf_path = sys.argv[1]
-max_pages = int(sys.argv[2])
-
-try:
-    import fitz
-except Exception as exc:
-    raise SystemExit(f'PyMuPDF(fitz) 不可用: {exc}')
-
-doc = fitz.open(pdf_path)
-text_parts = []
-images = []
-ocr_page_indices = []
-
-for page_index in range(len(doc)):
-    page = doc.load_page(page_index)
-    page_text = page.get_text('text') or ''
-    text_parts.append(page_text)
-    normalized = ''.join(page_text.split())
-    if len(normalized) < 40:
-        ocr_page_indices.append(page_index)
-
-processed_pages = len(ocr_page_indices) if max_pages <= 0 else min(len(ocr_page_indices), max_pages)
-for page_index in ocr_page_indices[:processed_pages]:
-    page = doc.load_page(page_index)
-    pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
-    png_bytes = pix.tobytes('png')
-    images.append(base64.b64encode(png_bytes).decode('ascii'))
-
-print(json.dumps({
-    'text': '\n'.join(text_parts),
-    'imagesBase64': images,
-    'processedPages': processed_pages,
-    'totalPages': len(doc),
-    'ocrCandidatePages': len(ocr_page_indices),
-    'ocrTruncated': len(ocr_page_indices) > processed_pages,
-}, ensure_ascii=False))
-"#;
-
-const OCR_HELPER_SCRIPT: &str = r#"
-import json
-import sys
-import urllib.parse
-import urllib.request
-
-BAIDU_TOKEN_ENDPOINT = 'https://aip.baidubce.com/oauth/2.0/token'
-BAIDU_ACCURATE_ENDPOINT = 'https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic'
-
-payload = json.loads(sys.stdin.read() or '{}')
-provider = (payload.get('provider') or '').strip()
-api_key = (payload.get('apiKey') or payload.get('api_key') or '').strip()
-secret_key = (payload.get('secretKey') or payload.get('secret_key') or '').strip()
-images = payload.get('imagesBase64') or payload.get('images_base64') or []
-
-if provider != 'baidu':
-    raise SystemExit('暂不支持当前 OCR 服务商。')
-
-if not api_key or not secret_key:
-    raise SystemExit('OCR 配置未保存完整，请补全 API Key 和 Secret Key。')
-
-token_query = urllib.parse.urlencode({
-    'grant_type': 'client_credentials',
-    'client_id': api_key,
-    'client_secret': secret_key,
-})
-
-token_request = urllib.request.Request(
-    f'{BAIDU_TOKEN_ENDPOINT}?{token_query}',
-    method='POST',
-    headers={'Accept': 'application/json'}
-)
-
-try:
-    with urllib.request.urlopen(token_request, timeout=60) as response:
-        token_data = json.loads(response.read().decode('utf-8', errors='replace'))
-except Exception as exc:
-    raise SystemExit(f'百度 OCR 鉴权失败: {exc}')
-
-access_token = token_data.get('access_token')
-if not access_token:
-    message = token_data.get('error_description') or token_data.get('error') or '未返回 access_token'
-    raise SystemExit(f'百度 OCR 鉴权失败: {message}')
-
-page_texts = []
-for image_base64 in images:
-    body = urllib.parse.urlencode({'image': image_base64}).encode('utf-8')
-    request = urllib.request.Request(
-        f'{BAIDU_ACCURATE_ENDPOINT}?access_token={access_token}',
-        data=body,
-        method='POST',
-        headers={
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Accept': 'application/json',
-        }
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            data = json.loads(response.read().decode('utf-8', errors='replace'))
-    except Exception as exc:
-        raise SystemExit(f'百度 OCR 请求失败: {exc}')
-
-    if data.get('error_code'):
-        raise SystemExit(f"百度 OCR 请求失败: {data.get('error_msg') or data.get('error_code')}")
-
-    words = [
-        (item.get('words') or '').strip()
-        for item in (data.get('words_result') or [])
-        if (item.get('words') or '').strip()
-    ]
-    if words:
-        page_texts.append('\n'.join(words))
-
-print(json.dumps({
-    'text': '\n\n'.join(page_texts),
-}, ensure_ascii=False))
-"#;

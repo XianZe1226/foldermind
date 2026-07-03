@@ -1,5 +1,5 @@
 import { performOcr } from "./backend";
-import type { OcrSettings } from "./types";
+import type { OcrResult, OcrSettings } from "./types";
 
 export function hasReadyOcrSettings(settings: OcrSettings): boolean {
   if (settings.provider === "none") {
@@ -12,9 +12,12 @@ export function hasReadyOcrSettings(settings: OcrSettings): boolean {
 export async function extractTextWithOcr(
   imagesBase64: string[],
   settings: OcrSettings
-): Promise<string> {
+): Promise<OcrResult> {
   if (!imagesBase64.length || settings.provider === "none") {
-    return "";
+    return {
+      text: "",
+      pageTexts: []
+    };
   }
 
   if (!hasReadyOcrSettings(settings)) {

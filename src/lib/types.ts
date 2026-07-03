@@ -93,11 +93,17 @@ export interface SaveResult {
 
 export interface PdfExtractionResult {
   text: string;
+  pageTexts: string[];
   imagesBase64: string[];
   processedPages: number;
   totalPages: number;
   ocrCandidatePages: number;
   ocrTruncated: boolean;
+}
+
+export interface OcrResult {
+  text: string;
+  pageTexts: string[];
 }
 
 export interface AppSnapshot {
