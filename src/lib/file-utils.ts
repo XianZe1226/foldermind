@@ -73,8 +73,8 @@ export async function rawFileToDocument(
               text = sanitizeText([text, ocrText].filter(Boolean).join("\n\n"));
               warnings.push(
                 payload.ocrTruncated
-                  ? `已启用 OCR，补充识别 ${payload.processedPages} 页疑似扫描页；仍有 ${Math.max(payload.ocrCandidatePages - payload.processedPages, 0)} 页未 OCR。`
-                  : `已启用 OCR，补充识别 ${payload.processedPages} 页疑似扫描页。`
+                  ? `这份 PDF 里有 ${payload.ocrCandidatePages} 页像扫描件或文字层不完整，已先用 OCR 补读其中 ${payload.processedPages} 页；还有 ${Math.max(payload.ocrCandidatePages - payload.processedPages, 0)} 页没补读完。`
+                  : `这份 PDF 里有 ${payload.processedPages} 页像扫描件或文字层不完整，已经自动用 OCR 补读。`
               );
             } else {
               warnings.push("已尝试 OCR，但仍未提取到有效正文。");
@@ -89,7 +89,7 @@ export async function rawFileToDocument(
         } else {
           warnings.push(
             payload.ocrCandidatePages > 0
-              ? `检测到 ${payload.ocrCandidatePages} 页疑似扫描页；如需补全文字，请在设置页开启 OCR。`
+              ? `这份 PDF 里有 ${payload.ocrCandidatePages} 页像扫描件或文字层不完整；如果想尽量补全文字，请在设置页开启 OCR。`
               : "PDF 正文较少，如为扫描版可在设置页开启 OCR。"
           );
         }

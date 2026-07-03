@@ -166,6 +166,7 @@ async function requestReviewSummaryMarkdown(
   settings: ProviderSettings
 ) {
   const sourcePacket = buildReviewSourcePacket(documents, notes);
+  const minCharacters = calculateReviewMinCharacters(notes, documents);
   const prompt = [
     "你是一个中文考试冲刺整理助手，请基于整批资料的笔记结果和原始资料摘录，输出一份可直接保存为 Markdown 的复习冲刺讲义。",
     "不要输出 JSON，不要输出代码块围栏，直接输出 Markdown 正文。",
@@ -200,28 +201,45 @@ async function requestReviewSummaryMarkdown(
   ].join("\n");
 
   try {
-    const content = await requestText(prompt, settings, {
-      temperature: 0.2,
-      max_tokens: 7000
-    });
-    const normalized =
-      content.trim() || buildFallbackReviewMarkdown(folderName, documents, notes, summary);
+    let candidate = sanitizeReviewMarkdown(
+      (
+        await requestText(prompt, settings, {
+          temperature: 0.2,
+          max_tokens: 9000
+        })
+      ).trim() || buildFallbackReviewMarkdown(folderName, documents, notes, summary)
+    );
+    let assessment = assessReviewMarkdown(candidate, notes, minCharacters);
 
-    if (needsKnowledgeOnlyRewrite(normalized)) {
-      const rewritten = await rewriteAsKnowledgeOnlyMarkdown(
-        folderName,
-        normalized,
-        sourcePacket,
-        settings
+    for (let attempt = 0; attempt < 3 && !assessment.pass; attempt += 1) {
+      candidate = sanitizeReviewMarkdown(
+        (
+          await rewriteAsKnowledgeOnlyMarkdown(
+            folderName,
+            candidate,
+            sourcePacket,
+            settings,
+            assessment,
+            minCharacters
+          )
+        ).trim() || candidate
       );
-      return sanitizeReviewMarkdown(
-        rewritten.trim() || buildFallbackReviewMarkdown(folderName, documents, notes, summary)
-      );
+      assessment = assessReviewMarkdown(candidate, notes, minCharacters);
     }
 
-    return sanitizeReviewMarkdown(normalized);
+    if (assessment.pass) {
+      return candidate;
+    }
+
+    const fallback = buildFallbackReviewMarkdown(folderName, documents, notes, summary);
+    const fallbackAssessment = assessReviewMarkdown(fallback, notes, minCharacters);
+    if (fallbackAssessment.pass) {
+      return fallback;
+    }
+
+    return buildForcedCoverageReviewMarkdown(folderName, documents, notes, summary);
   } catch {
-    return buildFallbackReviewMarkdown(folderName, documents, notes, summary);
+    return buildForcedCoverageReviewMarkdown(folderName, documents, notes, summary);
   }
 }
 
@@ -532,31 +550,30 @@ function buildReviewSourcePacket(documents: DocumentRecord[], notes: GeneratedNo
     .join("\n\n");
 }
 
-function needsKnowledgeOnlyRewrite(content: string): boolean {
-  const normalized = content.replace(/\s+/g, "");
-  return (
-    normalized.length < 2800 ||
-    /(Day\s*\d|按天|复习安排|学习安排|时间安排|冲刺安排|复习路线|第一天|第二天|第三天|今天|明天|后天)/i.test(
-      content
-    )
-  );
-}
-
 async function rewriteAsKnowledgeOnlyMarkdown(
   folderName: string,
   currentContent: string,
   sourcePacket: string,
-  settings: ProviderSettings
+  settings: ProviderSettings,
+  assessment: ReviewAssessment,
+  minCharacters: number
 ): Promise<string> {
   return requestText(
     [
       `请把下面这份《${folderName}》复习稿重写为“纯知识点 / 纯考点总讲义”。`,
       "要求：",
-      "1. 删除所有时间安排、按天安排、学习步骤、先后任务、冲刺路线、Day 1/2/3、今天/明天/后天。",
-      "2. 把篇幅尽量扩展到更长，优先增加知识点覆盖率和高频考点解释，不要增加空话。",
+      `1. 删除所有时间安排、按天安排、学习步骤、先后任务、冲刺路线、Day 1/2/3、今天/明天/后天、三天突击、复习安排、复习路线。`,
+      `2. 最终正文长度必须不少于 ${minCharacters} 个中文字符，优先增加高频考点解释和做题步骤，不要增加空话。`,
       "3. 只保留最纯粹的考试相关内容：会考什么、概念定义、公式规则、易错点、题型作答要点、最后速览。",
-      "4. 必须严格基于资料内容，不要引入资料外知识。",
-      "5. 直接输出 Markdown 正文，不要解释你做了什么。",
+      "4. 每个知识点都尽量写清：它是什么、常见怎么考、看到什么题眼要想到它、作答时必须写出的关键词、容易错在哪里、答题步骤怎么展开。",
+      "5. 必须严格基于资料内容，不要引入资料外知识。",
+      "6. 直接输出 Markdown 正文，不要解释你做了什么。",
+      `7. 当前版本未达标原因：长度=${assessment.characterCount}，覆盖率=${Math.round(
+        assessment.coverageRatio * 100
+      )}%${assessment.hasScheduleContent ? "，含安排内容" : ""}。`,
+      assessment.missingTopics.length
+        ? `8. 下面这些知识点当前覆盖不足，必须补进去并展开：${assessment.missingTopics.join("、")}`
+        : "8. 当前没有检测到明显缺失的标题，但你仍需继续扩充解释深度。",
       "",
       "当前版本：",
       currentContent,
@@ -567,7 +584,7 @@ async function rewriteAsKnowledgeOnlyMarkdown(
     settings,
     {
       temperature: 0.15,
-      max_tokens: 7000
+      max_tokens: 9000
     }
   );
 }
@@ -580,7 +597,7 @@ function sanitizeReviewMarkdown(content: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
     if (/^#{1,6}\s*/.test(trimmed)) {
-      skipSection = /(按天|安排|路线|Day\s*\d|第一天|第二天|第三天)/i.test(trimmed);
+      skipSection = /(按天|安排|路线|Day\s*\d|第一天|第二天|第三天|三天突击)/i.test(trimmed);
       if (skipSection) {
         continue;
       }
@@ -590,7 +607,11 @@ function sanitizeReviewMarkdown(content: string): string {
       continue;
     }
 
-    if (/(今天|明天|后天|Day\s*\d|第一天|第二天|第三天)/i.test(trimmed)) {
+    if (
+      /(今天|明天|后天|Day\s*\d|第一天|第二天|第三天|三天突击|复习路线|复习安排|按天)/i.test(
+        trimmed
+      )
+    ) {
       continue;
     }
 
@@ -598,6 +619,81 @@ function sanitizeReviewMarkdown(content: string): string {
   }
 
   return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+interface ReviewAssessment {
+  pass: boolean;
+  characterCount: number;
+  coverageRatio: number;
+  coveredTopics: string[];
+  missingTopics: string[];
+  hasScheduleContent: boolean;
+}
+
+function assessReviewMarkdown(
+  content: string,
+  notes: GeneratedNote[],
+  minCharacters: number
+): ReviewAssessment {
+  const normalized = content.replace(/\s+/g, "");
+  const coveredTopics: string[] = [];
+  const missingTopics: string[] = [];
+
+  for (const note of notes) {
+    if (isTopicCovered(content, note)) {
+      coveredTopics.push(note.title);
+    } else {
+      missingTopics.push(note.title);
+    }
+  }
+
+  const coverageRatio = notes.length ? coveredTopics.length / notes.length : 1;
+  const hasScheduleContent =
+    /(Day\s*\d|按天|复习安排|学习安排|时间安排|冲刺安排|复习路线|第一天|第二天|第三天|今天|明天|后天|三天突击)/i.test(
+      content
+    );
+
+  return {
+    pass: normalized.length >= minCharacters && coverageRatio >= 0.9 && !hasScheduleContent,
+    characterCount: normalized.length,
+    coverageRatio,
+    coveredTopics,
+    missingTopics,
+    hasScheduleContent
+  };
+}
+
+function calculateReviewMinCharacters(
+  notes: GeneratedNote[],
+  documents: DocumentRecord[]
+): number {
+  const sourceWeight = documents.reduce((sum, document) => sum + document.text.length, 0);
+  const scaledByNotes = notes.length * 260;
+  const scaledBySource = Math.min(Math.floor(sourceWeight / 5), 14000);
+  return Math.max(4200, scaledByNotes, scaledBySource);
+}
+
+function isTopicCovered(content: string, note: GeneratedNote): boolean {
+  if (content.includes(note.title)) {
+    return true;
+  }
+
+  const tokens = [...note.keywords, ...note.tags]
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+
+  if (!tokens.length) {
+    return false;
+  }
+
+  let matched = 0;
+  for (const token of tokens) {
+    if (content.includes(token)) {
+      matched += 1;
+    }
+  }
+
+  return matched >= Math.min(2, tokens.length);
 }
 
 function buildAnswerHook(note: GeneratedNote): string {
@@ -670,6 +766,64 @@ function buildFallbackReviewMarkdown(
           .map((note) => note.title)
           .join("、")}`
     ),
+    "",
+    "## 资料缺口",
+    "- 对正文较短、OCR 不完整或提示抽取失败的文件，做题前务必回原文件补读。",
+    "- 如果某些题型在资料里没有清楚出现，作答时优先写定义、目标、关键步骤、限制条件和易错点。"
+  ].join("\n");
+}
+
+function buildForcedCoverageReviewMarkdown(
+  folderName: string,
+  documents: DocumentRecord[],
+  notes: GeneratedNote[],
+  summary: ImportSummary
+): string {
+  const documentMap = new Map(documents.map((document) => [document.id, document]));
+
+  return [
+    `# ${folderName} 复习冲刺总结`,
+    "",
+    "## 这门课会考什么",
+    summary.overview || "以下内容完全基于现有资料整理，目标是把能直接用于做题的知识点尽量铺全。",
+    "",
+    "## 核心考点总图",
+    ...summary.highlights.map((item) => `- ${item}`),
+    "",
+    "## 必会知识点清单",
+    ...notes.map((note, index) => `${index + 1}. ${note.title}: ${note.summary}`),
+    "",
+    "## 高频考点逐条展开",
+    ...notes.flatMap((note) => {
+      const source = documentMap.get(note.documentId);
+      const sourceSnippet = source?.text
+        ? trimForModel(source.text, 1800)
+        : "当前文件正文抽取不足，建议回原文件补读。";
+      return [
+        `### ${note.title}`,
+        `- 这部分在资料里主要围绕这些词展开: ${note.keywords.join("、") || note.tags.join("、") || "待从原文补充"}`,
+        `- 这个知识点本身是什么: ${note.summary}`,
+        `- 常见题眼: 看到与 ${note.keywords.slice(0, 4).join("、") || note.title} 相关的描述时，要优先想到这一块。`,
+        `- 作答时必须写出的内容: ${buildAnswerHook(note)}`,
+        "- 易错点: 不要只给结论，必须把定义、条件、步骤、限制和结论之间的关系写清楚。",
+        `- 资料依据摘录: ${sourceSnippet}`,
+        ""
+      ];
+    }),
+    "## 必背定义 / 公式 / 规则",
+    ...notes.map((note) => `- ${note.title}: ${note.keywords.join("、") || note.summary}`),
+    "",
+    "## 易错易混辨析",
+    ...summary.highlights.map((item) => `- ${item}`),
+    "",
+    "## 题型拆解与作答要点",
+    ...notes.map(
+      (note) =>
+        `- ${note.title}: 题目一旦涉及这一块，就先写定义，再写关键条件、核心步骤、常见陷阱、最后写结论或结果。`
+    ),
+    "",
+    "## 最后一遍考点速览",
+    ...notes.map((note) => `- ${note.title}`),
     "",
     "## 资料缺口",
     "- 对正文较短、OCR 不完整或提示抽取失败的文件，做题前务必回原文件补读。",

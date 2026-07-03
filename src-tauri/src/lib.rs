@@ -1,6 +1,8 @@
 use std::{
     fs,
+    io::Write,
     process::Command,
+    process::Stdio,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -51,6 +53,15 @@ struct PdfExtractionResult {
     total_pages: u32,
     ocr_candidate_pages: u32,
     ocr_truncated: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrRequest {
+    images_base64: Vec<String>,
+    provider: String,
+    api_key: String,
+    secret_key: String,
 }
 
 #[command]
@@ -251,6 +262,59 @@ fn open_local_path(target_path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[command]
+fn perform_ocr(
+    images_base64: Vec<String>,
+    provider: String,
+    api_key: String,
+    secret_key: String,
+) -> Result<String, String> {
+    let payload = serde_json::to_string(&OcrRequest {
+        images_base64,
+        provider,
+        api_key,
+        secret_key,
+    })
+    .map_err(|error| error.to_string())?;
+
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(OCR_HELPER_SCRIPT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("无法启动本地 OCR 处理器: {error}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(payload.as_bytes())
+            .map_err(|error| format!("无法向 OCR 处理器传输数据: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("OCR 处理器执行失败: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "OCR 处理器执行失败。".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    let payload: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+
+    Ok(payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string())
+}
+
 fn read_text_file(path: &Path) -> Result<String, String> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(content),
@@ -275,7 +339,8 @@ pub fn run() {
             scan_folder,
             write_analysis_bundle,
             extract_pdf_payload,
-            open_local_path
+            open_local_path,
+            perform_ocr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -322,5 +387,84 @@ print(json.dumps({
     'totalPages': len(doc),
     'ocrCandidatePages': len(ocr_page_indices),
     'ocrTruncated': len(ocr_page_indices) > processed_pages,
+}, ensure_ascii=False))
+"#;
+
+const OCR_HELPER_SCRIPT: &str = r#"
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+BAIDU_TOKEN_ENDPOINT = 'https://aip.baidubce.com/oauth/2.0/token'
+BAIDU_ACCURATE_ENDPOINT = 'https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic'
+
+payload = json.loads(sys.stdin.read() or '{}')
+provider = (payload.get('provider') or '').strip()
+api_key = (payload.get('apiKey') or payload.get('api_key') or '').strip()
+secret_key = (payload.get('secretKey') or payload.get('secret_key') or '').strip()
+images = payload.get('imagesBase64') or payload.get('images_base64') or []
+
+if provider != 'baidu':
+    raise SystemExit('暂不支持当前 OCR 服务商。')
+
+if not api_key or not secret_key:
+    raise SystemExit('OCR 配置未保存完整，请补全 API Key 和 Secret Key。')
+
+token_query = urllib.parse.urlencode({
+    'grant_type': 'client_credentials',
+    'client_id': api_key,
+    'client_secret': secret_key,
+})
+
+token_request = urllib.request.Request(
+    f'{BAIDU_TOKEN_ENDPOINT}?{token_query}',
+    method='POST',
+    headers={'Accept': 'application/json'}
+)
+
+try:
+    with urllib.request.urlopen(token_request, timeout=60) as response:
+        token_data = json.loads(response.read().decode('utf-8', errors='replace'))
+except Exception as exc:
+    raise SystemExit(f'百度 OCR 鉴权失败: {exc}')
+
+access_token = token_data.get('access_token')
+if not access_token:
+    message = token_data.get('error_description') or token_data.get('error') or '未返回 access_token'
+    raise SystemExit(f'百度 OCR 鉴权失败: {message}')
+
+page_texts = []
+for image_base64 in images:
+    body = urllib.parse.urlencode({'image': image_base64}).encode('utf-8')
+    request = urllib.request.Request(
+        f'{BAIDU_ACCURATE_ENDPOINT}?access_token={access_token}',
+        data=body,
+        method='POST',
+        headers={
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            data = json.loads(response.read().decode('utf-8', errors='replace'))
+    except Exception as exc:
+        raise SystemExit(f'百度 OCR 请求失败: {exc}')
+
+    if data.get('error_code'):
+        raise SystemExit(f"百度 OCR 请求失败: {data.get('error_msg') or data.get('error_code')}")
+
+    words = [
+        (item.get('words') or '').strip()
+        for item in (data.get('words_result') or [])
+        if (item.get('words') or '').strip()
+    ]
+    if words:
+        page_texts.append('\n'.join(words))
+
+print(json.dumps({
+    'text': '\n\n'.join(page_texts),
 }, ensure_ascii=False))
 "#;
