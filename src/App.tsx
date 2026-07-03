@@ -172,7 +172,6 @@ function App() {
       }
 
       const readableDocuments = parsedDocuments.filter((document) => document.text.trim().length > 0);
-      setDocuments(parsedDocuments);
 
       if (!readableDocuments.length) {
         throw new Error("没有读到可用于总结的有效正文，请先检查文件内容或 OCR 配置。");
@@ -202,6 +201,7 @@ function App() {
         noteFiles
       );
 
+      setDocuments(parsedDocuments.map(compactDocumentForState));
       setNotes(generated.notes);
       setSummary(generated.summary);
       setReviewMarkdown(reviewReportMarkdown);
@@ -417,6 +417,13 @@ function createScannedDocument(file: RawScannedFile): DocumentRecord {
     text: "",
     excerpt: extractExcerpt(""),
     warnings: ["尚未读取正文；点击“总结当前文件夹”后才会开始解析。"]
+  };
+}
+
+function compactDocumentForState(document: DocumentRecord): DocumentRecord {
+  return {
+    ...document,
+    text: document.text.length > 800 ? document.text.slice(0, 800) : document.text
   };
 }
 

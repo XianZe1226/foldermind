@@ -1,6 +1,6 @@
 import type { OcrSettings, ProviderSettings, SupportedProvider } from "./types";
 
-export const STORAGE_KEY = "foldermind.snapshot.v2";
+export const STORAGE_KEY = "foldermind.snapshot.v3";
 
 export const defaultSettings: ProviderSettings = {
   provider: "deepseek",
