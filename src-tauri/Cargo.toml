@@ -1,6 +1,6 @@
 [package]
 name = "foldermind"
-version = "0.1.6"
+version = "0.1.7"
 description = "Local-first AI folder organization and note desktop app"
 authors = ["Codex"]
 edition = "2021"
@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
+pdf-extract = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }

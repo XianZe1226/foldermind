@@ -101,6 +101,21 @@ export interface PdfExtractionResult {
   ocrTruncated: boolean;
 }
 
+export interface PdfTextExtractionResult {
+  text: string;
+  pageTexts: string[];
+  totalPages: number;
+}
+
+export interface PdfOcrRenderResult {
+  imagesBase64: string[];
+  pageIndices: number[];
+  processedPages: number;
+  totalPages: number;
+  ocrCandidatePages: number;
+  ocrTruncated: boolean;
+}
+
 export interface OcrResult {
   text: string;
   pageTexts: string[];

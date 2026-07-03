@@ -49,6 +49,14 @@ struct OcrResult {
     page_texts: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfTextExtractionResult {
+    text: String,
+    page_texts: Vec<String>,
+    total_pages: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct BaiduTokenResponse {
     access_token: Option<String>,
@@ -209,6 +217,20 @@ fn open_local_path(target_path: String) -> Result<(), String> {
 }
 
 #[command]
+fn extract_pdf_text(pdf_path: String) -> Result<PdfTextExtractionResult, String> {
+    let pdf_bytes = fs::read(&pdf_path).map_err(|error| format!("无法读取 PDF 文件: {error}"))?;
+    let extracted_text = pdf_extract::extract_text_from_mem(&pdf_bytes)
+        .map_err(|error| format!("后端 PDF 文本抽取失败: {error}"))?;
+    let page_texts = split_pdf_pages(&extracted_text);
+
+    Ok(PdfTextExtractionResult {
+        text: page_texts.join("\n\n"),
+        total_pages: page_texts.len() as u32,
+        page_texts,
+    })
+}
+
+#[command]
 fn perform_ocr(
     images_base64: Vec<String>,
     provider: String,
@@ -345,8 +367,27 @@ pub fn run() {
             scan_folder,
             write_analysis_bundle,
             open_local_path,
+            extract_pdf_text,
             perform_ocr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn split_pdf_pages(raw: &str) -> Vec<String> {
+    let normalized = raw.replace("\r\n", "\n");
+    let mut pages = normalized
+        .split('\u{0C}')
+        .map(|page| page.trim().to_string())
+        .collect::<Vec<_>>();
+
+    while pages.last().is_some_and(|page| page.is_empty()) {
+        pages.pop();
+    }
+
+    if pages.is_empty() && !normalized.trim().is_empty() {
+        return vec![normalized.trim().to_string()];
+    }
+
+    pages
 }

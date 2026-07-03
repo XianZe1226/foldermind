@@ -5,6 +5,11 @@ type PromiseWithResolvers<T> = {
 };
 
 declare global {
+  interface String {
+    isWellFormed?(): boolean;
+    toWellFormed?(): string;
+  }
+
   interface PromiseConstructor {
     try?<TArgs extends unknown[], TResult>(
       callback: (...args: TArgs) => TResult | PromiseLike<TResult>,
@@ -174,6 +179,48 @@ if (
 if (typeof Response !== "undefined" && typeof Response.prototype.bytes !== "function") {
   defineValue(Response.prototype, "bytes", async function bytes(this: Response) {
     return new Uint8Array(await this.arrayBuffer());
+  });
+}
+
+if (typeof String.prototype.isWellFormed !== "function") {
+  defineValue(String.prototype, "isWellFormed", function isWellFormed(this: string) {
+    try {
+      encodeURIComponent(this);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+if (typeof String.prototype.toWellFormed !== "function") {
+  defineValue(String.prototype, "toWellFormed", function toWellFormed(this: string) {
+    const source = String(this);
+    let normalized = "";
+
+    for (let index = 0; index < source.length; index += 1) {
+      const code = source.charCodeAt(index);
+
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = source.charCodeAt(index + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          normalized += source[index] + source[index + 1];
+          index += 1;
+          continue;
+        }
+        normalized += "\uFFFD";
+        continue;
+      }
+
+      if (code >= 0xdc00 && code <= 0xdfff) {
+        normalized += "\uFFFD";
+        continue;
+      }
+
+      normalized += source[index];
+    }
+
+    return normalized;
   });
 }
 

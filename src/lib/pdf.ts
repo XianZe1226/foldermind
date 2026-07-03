@@ -1,12 +1,10 @@
-import type { PdfExtractionResult } from "./types";
+import type { PdfOcrRenderResult } from "./types";
 
 const OCR_RENDER_SCALE = 1.8;
-const OCR_TEXT_MIN_LENGTH = 40;
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
-let workerSrcPromise: Promise<string> | null = null;
 
 function loadPdfJsModule(): Promise<PdfJsModule> {
   if (!pdfJsModulePromise) {
@@ -16,28 +14,15 @@ function loadPdfJsModule(): Promise<PdfJsModule> {
   return pdfJsModulePromise;
 }
 
-function loadWorkerSrc(): Promise<string> {
-  if (!workerSrcPromise) {
-    workerSrcPromise = import("pdfjs-dist/legacy/build/pdf.worker.mjs?url").then(
-      (module) => module.default
-    );
-  }
-
-  return workerSrcPromise;
-}
-
 async function loadPdfDocument(buffer: ArrayBuffer) {
-  const [{ getDocument, GlobalWorkerOptions }, workerSrc] = await Promise.all([
-    loadPdfJsModule(),
-    loadWorkerSrc()
-  ]);
+  const { getDocument, GlobalWorkerOptions } = await loadPdfJsModule();
 
-  GlobalWorkerOptions.workerSrc = workerSrc;
+  if (!GlobalWorkerOptions.workerSrc) {
+    GlobalWorkerOptions.workerSrc = "/pdf.worker.mjs";
+  }
 
   return getDocument({
     data: new Uint8Array(buffer),
-    workerSrc,
-    // WKWebView 对新版 pdf.js worker 兼容性不稳定，这里直接在主线程解析。
     disableWorker: true,
     useWasm: false,
     isOffscreenCanvasSupported: false,
@@ -46,44 +31,24 @@ async function loadPdfDocument(buffer: ArrayBuffer) {
   } as Parameters<PdfJsModule["getDocument"]>[0]).promise;
 }
 
-function normalizedTextLength(text: string): number {
-  return text.replace(/\s/g, "").length;
-}
-
-function shouldUseOcrForPage(text: string): boolean {
-  return normalizedTextLength(text) < OCR_TEXT_MIN_LENGTH;
-}
-
-export async function extractPdfPayload(
+export async function renderPdfPagesForOcr(
   buffer: ArrayBuffer,
-  options: { renderAllPages?: boolean } = {}
-): Promise<PdfExtractionResult> {
+  options: { renderAllPages?: boolean; pageIndices?: number[] } = {}
+): Promise<PdfOcrRenderResult> {
   const pdf = await loadPdfDocument(buffer);
-  const pageTexts: string[] = [];
   const imagesBase64: string[] = [];
+  const pageIndices: number[] = [];
   const renderAllPages = options.renderAllPages ?? false;
-  let ocrCandidatePages = 0;
+  const requestedPages = new Set(options.pageIndices ?? []);
+  const shouldRenderSelectedPagesOnly = requestedPages.size > 0 && !renderAllPages;
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const text = content.items
-      .map((item) => ("str" in item ? item.str : ""))
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-
-    pageTexts.push(text);
-
-    const pageLooksScanned = shouldUseOcrForPage(text);
-    if (pageLooksScanned) {
-      ocrCandidatePages += 1;
-    }
-
-    if (!renderAllPages && !pageLooksScanned) {
+    const pageIndex = pageNumber - 1;
+    if (shouldRenderSelectedPagesOnly && !requestedPages.has(pageIndex)) {
       continue;
     }
 
+    const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
@@ -104,18 +69,18 @@ export async function extractPdfPayload(
     imagesBase64.push(
       canvas.toDataURL("image/jpeg", 0.92).replace(/^data:image\/\w+;base64,/, "")
     );
+    pageIndices.push(pageIndex);
 
     canvas.width = 0;
     canvas.height = 0;
   }
 
   return {
-    text: pageTexts.filter(Boolean).join("\n\n"),
-    pageTexts,
     imagesBase64,
+    pageIndices,
     processedPages: imagesBase64.length,
     totalPages: pdf.numPages,
-    ocrCandidatePages: renderAllPages ? pdf.numPages : ocrCandidatePages,
+    ocrCandidatePages: renderAllPages ? pdf.numPages : pageIndices.length,
     ocrTruncated: false
   };
 }

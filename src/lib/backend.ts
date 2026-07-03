@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   OcrSettings,
   OcrResult,
+  PdfTextExtractionResult,
   RawScannedFile,
   SaveResult,
   SavedArtifact
@@ -36,6 +37,12 @@ export async function writeAnalysisBundle(
 export async function openLocalPath(targetPath: string): Promise<void> {
   return invoke("open_local_path", {
     targetPath
+  });
+}
+
+export async function extractPdfText(pdfPath: string): Promise<PdfTextExtractionResult> {
+  return invoke<PdfTextExtractionResult>("extract_pdf_text", {
+    pdfPath
   });
 }
 
