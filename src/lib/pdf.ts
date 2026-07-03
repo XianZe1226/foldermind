@@ -38,7 +38,11 @@ async function loadPdfDocument(buffer: ArrayBuffer) {
     data: new Uint8Array(buffer),
     workerSrc,
     // WKWebView 对新版 pdf.js worker 兼容性不稳定，这里直接在主线程解析。
-    disableWorker: true
+    disableWorker: true,
+    useWasm: false,
+    isOffscreenCanvasSupported: false,
+    isImageDecoderSupported: false,
+    useWorkerFetch: false
   } as Parameters<PdfJsModule["getDocument"]>[0]).promise;
 }
 

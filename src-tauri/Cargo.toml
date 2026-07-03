@@ -1,6 +1,6 @@
 [package]
 name = "foldermind"
-version = "0.1.5"
+version = "0.1.6"
 description = "Local-first AI folder organization and note desktop app"
 authors = ["Codex"]
 edition = "2021"
